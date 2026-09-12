@@ -1,0 +1,10 @@
+{
+  "updated_at": "2026-09-12",
+  "sources": [
+    {"id":"lerobot-smolvla","title":"LeRobot SmolVLA documentation","publisher":"Hugging Face","url":"https://huggingface.co/docs/lerobot/smolvla","used_for":"model interface, fine-tuning and SO-101 example guidance"},
+    {"id":"lerobot-hardware","title":"LeRobot SO-101 teleoperation guide","publisher":"Hugging Face","url":"https://huggingface.co/docs/lerobot/il_robots","used_for":"SO-101 leader/follower operating model"},
+    {"id":"pi0-paper","title":"π₀: A Vision-Language-Action Flow Model for General Robot Control","publisher":"Physical Intelligence","url":"https://www.physicalintelligence.company/download/pi0.pdf","used_for":"generalist VLA research reference"},
+    {"id":"lerobot-dataset","title":"LeRobotDataset v3 documentation","publisher":"Hugging Face","url":"https://huggingface.co/docs/lerobot/lerobot-dataset-v3","used_for":"recording format and dataset interoperability"},
+    {"id":"vault","title":"6-DOF gym on the web design pack","publisher":"Local Obsidian vault","url":"file:///Users/admin/Library/Mobile%20Documents/iCloud~md~obsidian/Documents/6dof_gym_vault/README.md","used_for":"architecture, safety, task-spec and deployment direction"}
+  ]
+}

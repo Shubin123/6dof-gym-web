@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1.0",
+  "generated_at": "2026-09-12",
+  "environment": {"id":"Arm6-Reach-v0","control_hz":25,"physics_hz":500,"observation_dim":22,"action_dim":7,"max_steps":200,"safety":{"joint_delta_rad":0.05,"goal_workspace":[68,692,72,408]}},
+  "workflows": [
+    {"id":"reach","number":"01","name":"Bin reach","instruction":"Move the gripper above the amber marker.","goal":[570,170],"object":"target","metric":"distance < 20 mm"},
+    {"id":"pick-place","number":"02","name":"Pick & place","instruction":"Approach, close the gripper, then move a cube to the bin.","goal":[555,185],"object":"cube","metric":"grasp + placement"},
+    {"id":"sort","number":"03","name":"Part sorting","instruction":"Move a part from the workcell into its designated lane.","goal":[505,300],"object":"part","metric":"correct-bin rate"},
+    {"id":"handoff","number":"04","name":"Safe handoff","instruction":"Bring an object to a handoff pose and wait for release.","goal":[620,260],"object":"object","metric":"safe completion"}
+  ],
+  "models": [
+    {"name":"ACT","kind":"Specialist baseline","use":"Fast, task-specific imitation baseline for a fixed workcell.","notes":["Action chunking","Low deployment cost","Use as a control baseline"],"url":"https://huggingface.co/docs/lerobot/act"},
+    {"name":"SmolVLA","kind":"Recommended starting point","use":"Fine-tunable open vision-language-action policy for camera-guided SO-101-style manipulation.","notes":["450M base model","Language + multi-camera conditioning","Fine-tune on task demonstrations"],"url":"https://huggingface.co/docs/lerobot/smolvla"},
+    {"name":"π₀ / π₀.₅","kind":"Research reference","use":"Generalist VLA reference for long-horizon, diverse robot control research.","notes":["Flow-matching actions","Heterogeneous robot data","Requires separate access / integration"],"url":"https://www.physicalintelligence.company/research/"}
+  ],
+  "datasets": [
+    {"name":"LeRobotDataset recordings","type":"First-party collection target","purpose":"Teleoperation, camera frames, state/action and task text for the specific workcell.","license":"Set by publisher","url":"https://huggingface.co/docs/lerobot/lerobot-dataset-v3"},
+    {"name":"SVLA SO-101 pick-place","type":"Reference demonstrations","purpose":"Example dataset and task setup for SmolVLA fine-tuning and real SO-101 pick-and-place.","license":"See dataset card","url":"https://huggingface.co/datasets/lerobot/svla_so101_pickplace"},
+    {"name":"RoboCasa / LIBERO","type":"Simulation evaluation","purpose":"Held-out scene and task evaluation before considering hardware deployment.","license":"See project terms","url":"https://huggingface.co/docs/lerobot/robocasa"}
+  ]
+}
