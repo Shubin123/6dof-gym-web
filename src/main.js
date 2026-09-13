@@ -1,6 +1,6 @@
 import './styles.css';
 import compiled from '../data/compiled.json';
-import { ARM, clamp, distance, forwardKinematics, guidedStep, projectToReachableWorkspace, solveInverseKinematics } from './core.js';
+import { ARM, buildEpisodeArtifact, clamp, distance, forwardKinematics, guidedStep, MAX_EPISODE_TRANSITIONS, projectToReachableWorkspace, solveInverseKinematics } from './core.js';
 
 const $ = (selector) => document.querySelector(selector);
 const fmt = (value, digits = 2) => Number(value).toFixed(digits);
@@ -16,10 +16,172 @@ const state = {
   startedAt: performance.now(),
   currentWorkflow: compiled.workflows[0],
   guidancePlan: null,
+  replaying: false,
+  voice: { dataUrl: null, mimeType: null, transcript: '', audioUrl: null, recorder: null, recognition: null, stream: null, bytes: 0, captureTimeout: null },
 };
 const sliders = $('#sliders');
 const joints = $('#joints');
 const gripper = $('#gripper');
+const MAX_VOICE_BYTES = 5 * 1024 * 1024;
+const MAX_IMPORT_BYTES = 8 * 1024 * 1024;
+
+function setVoiceStatus(message, isError = false) {
+  $('#voice-status').textContent = message;
+  $('#voice-status').style.color = isError ? '#b04a24' : '#45861a';
+}
+
+function setVoiceAudio(dataUrl, mimeType = null) {
+  if (state.voice.audioUrl) URL.revokeObjectURL(state.voice.audioUrl);
+  state.voice.dataUrl = dataUrl;
+  state.voice.mimeType = mimeType || (dataUrl ? dataUrl.slice(5, dataUrl.indexOf(';')) : null);
+  state.voice.audioUrl = dataUrl;
+  $('#voice-play').disabled = !dataUrl;
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+function stopVoiceRecognition() {
+  if (state.voice.recognition) {
+    state.voice.recognition.stop();
+    state.voice.recognition = null;
+  }
+}
+
+function beginTranscription() {
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition) return false;
+  const recognition = new Recognition();
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = navigator.language || 'en-US';
+  recognition.onresult = (event) => {
+    let transcript = '';
+    for (let index = 0; index < event.results.length; index += 1) transcript += event.results[index][0].transcript;
+    state.voice.transcript = transcript.trim();
+    $('#transcript').value = state.voice.transcript;
+  };
+  recognition.onerror = () => setVoiceStatus('Audio saved; browser transcription unavailable', true);
+  try {
+    recognition.start();
+    state.voice.recognition = recognition;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function finishVoiceCapture(recorder) {
+  const blob = new Blob(recorder.chunks, { type: recorder.mimeType || 'audio/webm' });
+  clearTimeout(state.voice.captureTimeout);
+  state.voice.captureTimeout = null;
+  recorder.stream.getTracks().forEach((track) => track.stop());
+  state.voice.recorder = null;
+  state.voice.stream = null;
+  stopVoiceRecognition();
+  $('#voice-record').textContent = '● Capture voice';
+  if (!blob.size) { setVoiceStatus('No audio was captured', true); return; }
+  setVoiceStatus('Encoding audio for episode…');
+  try {
+    setVoiceAudio(await blobToDataUrl(blob), blob.type);
+    setVoiceStatus('Audio captured · replayable and embedded on export');
+  } catch {
+    setVoiceStatus('Audio captured but could not be serialized', true);
+  }
+}
+
+async function toggleVoiceCapture() {
+  if (state.voice.recorder) {
+    state.voice.recorder.stop();
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    setVoiceStatus('Audio capture is unavailable in this browser', true);
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const recorder = new MediaRecorder(stream);
+    recorder.stream = stream;
+    recorder.chunks = [];
+    recorder.ondataavailable = (event) => {
+      if (!event.data.size) return;
+      if (state.voice.bytes + event.data.size > MAX_VOICE_BYTES) {
+        setVoiceStatus('Voice capture reached the 5 MB episode limit', true);
+        recorder.stop();
+        return;
+      }
+      state.voice.bytes += event.data.size;
+      recorder.chunks.push(event.data);
+    };
+    recorder.onstop = () => finishVoiceCapture(recorder);
+    recorder.start(250);
+    state.voice.recorder = recorder;
+    state.voice.stream = stream;
+    state.voice.bytes = 0;
+    state.voice.captureTimeout = setTimeout(() => {
+      setVoiceStatus('Voice capture reached the 60 second episode limit', true);
+      recorder.stop();
+    }, 60_000);
+    const transcribing = beginTranscription();
+    setVoiceStatus(transcribing ? 'Recording and transcribing…' : 'Recording audio · transcription unavailable');
+    $('#voice-record').textContent = '■ Stop voice';
+  } catch {
+    setVoiceStatus('Microphone permission was not granted', true);
+  }
+}
+
+function replayEpisode() {
+  if (!state.transitions.length || state.replaying) return;
+  state.replaying = true;
+  $('#replay').textContent = 'Replay in progress…';
+  let index = 0;
+  const run = () => {
+    const transition = state.transitions[index];
+    state.q = transition.observation.slice(0, 6);
+    state.lastAction = transition.action_after_safety_clamp.slice(0, 6);
+    state.step = transition.index;
+    syncSliders(); updateArm();
+    index += 1;
+    if (index < state.transitions.length) setTimeout(run, 1000 / compiled.environment.control_hz);
+    else { state.replaying = false; $('#replay').textContent = '↻ Replay episode'; }
+  };
+  if (state.voice.dataUrl) new Audio(state.voice.dataUrl).play().catch(() => {});
+  run();
+}
+
+function importEpisode(file) {
+  if (file.size > MAX_IMPORT_BYTES) {
+    setVoiceStatus('Episode is larger than the 8 MB browser safety limit', true);
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const artifact = JSON.parse(reader.result);
+      if (!Array.isArray(artifact.transitions) || !artifact.transitions.every((entry) => Array.isArray(entry.observation) && entry.observation.length >= 6)) throw new Error('invalid episode');
+      state.transitions = artifact.transitions;
+      state.currentWorkflow = compiled.workflows.find((workflow) => workflow.id === artifact.task?.id) || state.currentWorkflow;
+      if (artifact.task?.goal) setGoal(...artifact.task.goal);
+      state.voice.transcript = artifact.voice?.transcript || '';
+      $('#transcript').value = state.voice.transcript;
+      setVoiceAudio(artifact.voice?.audio_data_url || null, artifact.voice?.mime_type);
+      $('#recording-count').textContent = state.transitions.length;
+      $('#download').disabled = false;
+      $('#replay').disabled = !state.transitions.length;
+      setVoiceStatus(state.voice.dataUrl ? 'Episode imported · audio ready to replay' : 'Episode imported · no audio attached');
+    } catch {
+      setVoiceStatus('Could not import that episode file', true);
+    }
+  };
+  reader.readAsText(file);
+}
 
 function updateArm() {
   const { points, angle } = forwardKinematics();
@@ -65,6 +227,11 @@ function setGoal(x, y) {
 
 function addTransition() {
   if (!state.recording) return;
+  if (state.transitions.length >= MAX_EPISODE_TRANSITIONS) {
+    state.recording = false;
+    $('#record').textContent = '● Record';
+    return;
+  }
   const { points } = forwardKinematics();
   const [x, y] = points.at(-1);
   state.transitions.push({
@@ -75,6 +242,11 @@ function addTransition() {
   });
   $('#recording-count').textContent = state.transitions.length;
   $('#download').disabled = false;
+  $('#replay').disabled = false;
+  if (state.transitions.length === MAX_EPISODE_TRANSITIONS) {
+    state.recording = false;
+    $('#record').textContent = '● Record';
+  }
 }
 
 function renderWorkflows() {
@@ -116,9 +288,20 @@ function installListeners() {
   $('#workflow-cards').addEventListener('click', (event) => { const id = event.target.dataset.workflow; if (id) loadWorkflow(id); });
   $('#run-policy').addEventListener('click', demoPolicy);
   $('#reset').addEventListener('click', () => { state.q = [-0.45, 0.2, 0.3, -0.2, -0.1, 0.15]; state.lastAction = Array(6).fill(0); state.step = 0; state.running = false; syncSliders(); updateArm(); });
-  $('#record').addEventListener('click', () => { state.recording = !state.recording; $('#record').textContent = state.recording ? '■ Stop recording' : '● Record'; });
+  $('#record').addEventListener('click', () => {
+    if (state.recording) { state.recording = false; $('#record').textContent = '● Record'; return; }
+    state.transitions = []; state.step = 0; state.recording = true;
+    $('#recording-count').textContent = '0'; $('#download').disabled = true; $('#replay').disabled = true;
+    $('#record').textContent = '■ Stop recording';
+  });
+  $('#voice-record').addEventListener('click', toggleVoiceCapture);
+  $('#voice-play').addEventListener('click', () => { if (state.voice.dataUrl) new Audio(state.voice.dataUrl).play().catch(() => setVoiceStatus('Audio playback was blocked by the browser', true)); });
+  $('#transcript').addEventListener('input', (event) => { state.voice.transcript = event.target.value; });
+  $('#replay').addEventListener('click', replayEpisode);
+  $('#import').addEventListener('click', () => $('#import-file').click());
+  $('#import-file').addEventListener('change', (event) => { if (event.target.files[0]) importEpisode(event.target.files[0]); event.target.value = ''; });
   $('#download').addEventListener('click', () => {
-    const artifact = {schema:'armlab-episode-preview/v0.1', environment:compiled.environment.id, task:state.currentWorkflow, source:'browser-simulation', transitions:state.transitions};
+    const artifact = buildEpisodeArtifact({ environment: compiled.environment.id, task: state.currentWorkflow, transitions: state.transitions, voice: state.voice });
     const url = URL.createObjectURL(new Blob([JSON.stringify(artifact, null, 2)], {type:'application/json'})); const link = document.createElement('a'); link.href = url; link.download = `armlab-${state.currentWorkflow.id}-${Date.now()}.json`; link.click(); URL.revokeObjectURL(url);
   });
   document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => { document.querySelectorAll('.tab,.tab-content').forEach((el) => el.classList.remove('active')); tab.classList.add('active'); $(`#${tab.dataset.tab}`).classList.add('active'); }));

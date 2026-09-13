@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import compiled from '../data/compiled.json' with { type: 'json' };
-import { ARM, distance, forwardKinematics, guidedStep, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
+import { ARM, buildEpisodeArtifact, distance, forwardKinematics, guidedStep, MAX_EPISODE_TRANSITIONS, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
 
 test('compiled environment has the browser task contract', () => {
   assert.equal(compiled.environment.id, 'Arm6-Reach-v0');
@@ -63,4 +63,15 @@ test('guidance recovers from representative manual poses throughout the workspac
 test('dragged guidance target is projected safely into the reachable workspace', () => {
   const target = projectToReachableWorkspace([760, 0], compiled.environment.safety);
   assert.ok(distance(target, ARM.base) <= compiled.environment.safety.max_reach_px + 1e-9);
+});
+
+test('episode exports retain optional replayable voice fields', () => {
+  const artifact = buildEpisodeArtifact({ environment: 'Arm6-Reach-v0', task: compiled.workflows[0], transitions: [], voice: { transcript: 'place the cube', mimeType: 'audio/webm', dataUrl: 'data:audio/webm;base64,AA==' } });
+  assert.equal(artifact.schema, 'armlab-episode-preview/v0.2');
+  assert.equal(artifact.voice.transcript, 'place the cube');
+  assert.match(artifact.voice.audio_data_url, /^data:audio\/webm;base64,/);
+});
+
+test('browser episode buffer has a finite task-aligned bound', () => {
+  assert.equal(MAX_EPISODE_TRANSITIONS, compiled.environment.max_steps);
 });

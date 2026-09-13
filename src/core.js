@@ -4,6 +4,7 @@ export const ARM = Object.freeze({
   jointLimit: 1.7,
   maxActionDelta: 0.05,
 });
+export const MAX_EPISODE_TRANSITIONS = 200;
 
 export const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 
@@ -79,4 +80,20 @@ export function projectToReachableWorkspace(point, workspace, arm = ARM) {
   const radius = Math.hypot(...fromBase);
   if (radius <= maxRadius) return candidate;
   return [arm.base[0] + fromBase[0] / radius * maxRadius, arm.base[1] + fromBase[1] / radius * maxRadius];
+}
+
+/** Portable browser episode envelope; voice is optional and self-contained. */
+export function buildEpisodeArtifact({ environment, task, transitions, voice }) {
+  return {
+    schema: 'armlab-episode-preview/v0.2',
+    environment,
+    task,
+    source: 'browser-simulation',
+    transitions,
+    voice: {
+      transcript: voice?.transcript || '',
+      mime_type: voice?.mimeType || null,
+      audio_data_url: voice?.dataUrl || null,
+    },
+  };
 }

@@ -55,8 +55,13 @@
             </div>
             <div class="tab-content" id="episode">
               <p class="episode-number"><strong id="recording-count">0</strong> transitions captured</p>
-              <p class="help">Recordings contain observations, safety-clamped actions, task metadata, and timestamp. They use a portable JSON preview schema inspired by LeRobot fields.</p>
-              <button id="download" class="button compact ghost" disabled>Download recording</button>
+              <p class="help">Recordings contain observations, safety-clamped actions, task metadata, timestamps, and optional voice instruction. Audio is embedded in the portable JSON preview so an imported episode can be replayed offline.</p>
+              <div class="voice-capture">
+                <div class="voice-heading"><span>Voice instruction</span><b id="voice-status">No audio captured</b></div>
+                <div class="voice-actions"><button id="voice-record" class="button compact ghost">● Capture voice</button><button id="voice-play" class="button compact ghost" disabled>▶ Play audio</button></div>
+                <label class="transcript-label" for="transcript">Transcript <textarea id="transcript" rows="3" placeholder="Browser transcription appears here. You can correct it before export."></textarea></label>
+              </div>
+              <div class="episode-actions"><button id="replay" class="button compact ghost" disabled>↻ Replay episode</button><button id="import" class="button compact ghost">Import episode</button><button id="download" class="button compact ghost" disabled>Download recording</button><input id="import-file" type="file" accept="application/json" hidden /></div>
             </div>
           </aside>
         </div>
