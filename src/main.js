@@ -1,6 +1,6 @@
 import './styles.css';
 import compiled from '../data/compiled.json';
-import { ARM, clamp, distance, forwardKinematics, guidedStep, projectToReachableWorkspace } from './core.js';
+import { ARM, clamp, distance, forwardKinematics, guidedStep, projectToReachableWorkspace, solveInverseKinematics } from './core.js';
 
 const $ = (selector) => document.querySelector(selector);
 const fmt = (value, digits = 2) => Number(value).toFixed(digits);
@@ -15,6 +15,7 @@ const state = {
   step: 0,
   startedAt: performance.now(),
   currentWorkflow: compiled.workflows[0],
+  guidancePlan: null,
 };
 const sliders = $('#sliders');
 const joints = $('#joints');
@@ -55,6 +56,7 @@ function syncSliders() {
 
 function setGoal(x, y) {
   state.goal = projectToReachableWorkspace([x, y], compiled.environment.safety, ARM);
+  state.guidancePlan = solveInverseKinematics(state.goal, ARM);
   $('#goal-ring').setAttribute('cx', state.goal[0]); $('#goal-ring').setAttribute('cy', state.goal[1]);
   $('#goal-cross').setAttribute('d', `M${state.goal[0] - 20} ${state.goal[1]}h40M${state.goal[0]} ${state.goal[1] - 20}v40`);
   $('#object').setAttribute('transform', `translate(${state.goal[0]} ${state.goal[1]})`);
@@ -97,7 +99,7 @@ function demoPolicy() {
   state.running = true; $('#run-policy').textContent = 'Policy running…';
   let frames = 0;
   const run = () => {
-    const guided = guidedStep(state.q, state.goal, ARM);
+    const guided = guidedStep(state.q, state.goal, ARM, state.guidancePlan);
     state.q = guided.q; state.lastAction = guided.action;
     state.step += 1; syncSliders(); updateArm(); addTransition(); frames += 1;
     if (frames < compiled.environment.max_steps && guided.distance > 8 && state.step < compiled.environment.max_steps) requestAnimationFrame(run);

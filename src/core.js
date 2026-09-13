@@ -23,24 +23,51 @@ export function forwardKinematics(q, arm = ARM) {
 export const distance = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 const angleDelta = (to, from) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
 
-/** One safety-capped cyclic-coordinate-descent update. */
-export function guidedStep(q, target, arm = ARM, passes = 3) {
-  const next = [...q];
-  const previous = [...q];
-  const perPassLimit = arm.maxActionDelta / passes;
-  for (let pass = 0; pass < passes; pass += 1) {
-    for (let joint = next.length - 1; joint >= 0; joint -= 1) {
-      const { points } = forwardKinematics(next, arm);
-      const pivot = points[joint];
-      const endEffector = points.at(-1);
-      const targetAngle = Math.atan2(target[1] - pivot[1], target[0] - pivot[0]);
-      const effectorAngle = Math.atan2(endEffector[1] - pivot[1], endEffector[0] - pivot[0]);
-      const requested = angleDelta(targetAngle, effectorAngle);
-      const permitted = clamp(requested, -perPassLimit, perPassLimit);
-      next[joint] = clamp(next[joint] + permitted, -arm.jointLimit, arm.jointLimit);
+/**
+ * Find a bounded joint-space target with deterministic multi-start CCD.
+ *
+ * A single CCD run can settle into a joint-limit local minimum after an
+ * operator has moved the sliders. Trying a small, fixed set of postures makes
+ * guidance reproducible and lets the browser choose the closest valid plan.
+ */
+export function solveInverseKinematics(target, arm = ARM) {
+  const seeds = [
+    [0, 0, 0, 0, 0, 0],
+    [0.6, -0.6, 0.6, -0.6, 0.4, -0.4],
+    [-0.6, 0.6, -0.6, 0.6, -0.4, 0.4],
+    [1, -0.5, 0.8, -0.5, 0.6, -0.4],
+    [-1, 0.5, -0.8, 0.5, -0.6, 0.4],
+    [0.2, 0.5, -0.5, 0.5, -0.5, 0.3],
+    [-0.2, -0.5, 0.5, -0.5, 0.5, -0.3],
+  ];
+  let best = null;
+  for (const seed of seeds) {
+    const q = seed.map((value) => clamp(value, -arm.jointLimit, arm.jointLimit));
+    for (let iteration = 0; iteration < 250; iteration += 1) {
+      for (let joint = q.length - 1; joint >= 0; joint -= 1) {
+        const { points } = forwardKinematics(q, arm);
+        const pivot = points[joint];
+        const endEffector = points.at(-1);
+        const targetAngle = Math.atan2(target[1] - pivot[1], target[0] - pivot[0]);
+        const effectorAngle = Math.atan2(endEffector[1] - pivot[1], endEffector[0] - pivot[0]);
+        q[joint] = clamp(q[joint] + clamp(angleDelta(targetAngle, effectorAngle), -0.2, 0.2), -arm.jointLimit, arm.jointLimit);
+      }
+      if (distance(forwardKinematics(q, arm).points.at(-1), target) < 1) break;
     }
+    const candidate = { q, distance: distance(forwardKinematics(q, arm).points.at(-1), target) };
+    if (!best || candidate.distance < best.distance) best = candidate;
   }
-  const action = next.map((value, index) => value - previous[index]);
+  return best;
+}
+
+/** One safety-capped tracking update toward an already validated IK plan. */
+export function guidedStep(q, target, arm = ARM, plan = solveInverseKinematics(target, arm)) {
+  const next = q.map((value, index) => clamp(
+    value + clamp(plan.q[index] - value, -arm.maxActionDelta, arm.maxActionDelta),
+    -arm.jointLimit,
+    arm.jointLimit,
+  ));
+  const action = next.map((value, index) => value - q[index]);
   return { q: next, action, distance: distance(forwardKinematics(next, arm).points.at(-1), target) };
 }
 

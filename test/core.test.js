@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import compiled from '../data/compiled.json' with { type: 'json' };
-import { ARM, distance, forwardKinematics, guidedStep, projectToReachableWorkspace } from '../src/core.js';
+import { ARM, distance, forwardKinematics, guidedStep, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
 
 test('compiled environment has the browser task contract', () => {
   assert.equal(compiled.environment.id, 'Arm6-Reach-v0');
@@ -23,14 +23,40 @@ test('model and dataset cards retain a primary URL', () => {
 test('guidance lowers distance for every supplied arm-use workflow', () => {
   for (const { goal } of compiled.workflows) {
     let q = [-0.45, 0.2, 0.3, -0.2, -0.1, 0.15];
+    const plan = solveInverseKinematics(goal);
+    assert.ok(plan.distance < 2, `${goal} should have a valid IK plan`);
     const before = distance(forwardKinematics(q).points.at(-1), goal);
     for (let step = 0; step < compiled.environment.max_steps; step += 1) {
-      const update = guidedStep(q, goal); q = update.q;
+      const update = guidedStep(q, goal, ARM, plan); q = update.q;
       assert.ok(update.action.every((delta) => Math.abs(delta) <= ARM.maxActionDelta + 1e-9));
     }
     const after = distance(forwardKinematics(q).points.at(-1), goal);
     assert.ok(after < 12, `${goal} finished ${after.toFixed(1)}px from target`);
     assert.ok(after < before, 'guidance should reduce target distance');
+  }
+});
+
+test('guidance recovers from representative manual poses throughout the workspace', () => {
+  const starts = [
+    [-0.45, 0.2, 0.3, -0.2, -0.1, 0.15], [0, 0, 0, 0, 0, 0],
+    [1.2, -1.1, 0.8, -0.6, 0.4, -0.2], [-1.2, 1.1, -0.8, 0.6, -0.4, 0.2],
+  ];
+  const targets = [];
+  for (let x = 80; x <= 640; x += 70) for (let y = 90; y <= 400; y += 62) {
+    targets.push(projectToReachableWorkspace([x, y], compiled.environment.safety));
+  }
+  for (const target of targets) {
+    const plan = solveInverseKinematics(target);
+    assert.ok(plan.distance < 2, `${target} should be plannable`);
+    for (const start of starts) {
+      let q = [...start];
+      for (let step = 0; step < compiled.environment.max_steps; step += 1) {
+        const update = guidedStep(q, target, ARM, plan);
+        assert.ok(update.action.every((delta) => Math.abs(delta) <= ARM.maxActionDelta + 1e-9));
+        q = update.q;
+      }
+      assert.ok(distance(forwardKinematics(q).points.at(-1), target) < 2, `${start} did not recover to ${target}`);
+    }
   }
 });
 
