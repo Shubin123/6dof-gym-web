@@ -1,4 +1,5 @@
 # ArmLab — 6‑DOF Gym
+protype link: [https://shubin123.github.io/6dof-gym-web/] 
 
 A static, interactive web prototype for designing and validating 6-DOF arm tasks. It demonstrates a task contract, a library of fully specified examples, browser episode recording, curated source data, and an explicit policy-selection ladder.
 
