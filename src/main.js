@@ -1,30 +1,45 @@
 import './styles.css';
 import compiled from '../data/compiled.json';
 import registry from '../data/sources.json';
-import { ARM, buildEpisodeArtifact, clamp, distance, forwardKinematics, guidedStep, MAX_EPISODE_TRANSITIONS, projectToReachableWorkspace, solveInverseKinematics } from './core.js';
+import { ARM, ARM_B, buildEpisodeArtifact, clamp, distance, forwardKinematics, GOAL_Z, guidedStep, HALT, haltState, MAX_EPISODE_TRANSITIONS, nearestArm, projectToReachableWorkspace, solveInverseKinematics } from './core.js';
 
 const $ = (selector) => document.querySelector(selector);
 const fmt = (value, digits = 2) => Number(value).toFixed(digits);
 
-const state = {
-  goal: [...compiled.workflows[0].goal],
-  q: [-0.45, 0.2, 0.3, -0.2, -0.1, 0.15],
+/** A resting posture that arcs up over the table and comes back down onto it. */
+const HOME_POSE = Object.freeze([1.284, 1.61, -1.688, -0.865, -1.522, -1.004]);
+const JOINT_LABELS = ['Yaw', 'Pitch', 'Pitch', 'Yaw', 'Pitch', 'Roll'];
+const jointLimitOf = (index) => (index === 0 ? ARM.yawLimit : ARM.jointLimit);
+const ARMS = [ARM, ARM_B];
+
+const makeArmState = (arm) => ({
+  arm,
+  q: [...HOME_POSE],
   lastAction: Array(6).fill(0),
-  running: false,
+  goal: [...compiled.workflows[0].goal, compiled.workflows[0].goal_height],
+  plan: null,
+});
+
+const state = {
+  arms: ARMS.map(makeArmState),
+  armCount: 1,
+  activeArm: 0,
   recording: false,
   transitions: [],
   step: 0,
   startedAt: performance.now(),
   currentWorkflow: compiled.workflows[0],
-  guidancePlan: null,
   replaying: false,
   familyFilter: 'all',
   modelFilter: 'all',
+  policy: { status: HALT.IDLE, steps: 0, speed: 1, loop: false, frame: null, accumulator: 0, restart: null },
   voice: { dataUrl: null, mimeType: null, transcript: '', audioUrl: null, recorder: null, recognition: null, stream: null, bytes: 0, captureTimeout: null },
 };
+
+const activeArms = () => state.arms.slice(0, state.armCount);
+const controlledArm = () => state.arms[state.activeArm];
+
 const sliders = $('#sliders');
-const joints = $('#joints');
-const gripper = $('#gripper');
 const MAX_VOICE_BYTES = 5 * 1024 * 1024;
 const MAX_IMPORT_BYTES = 8 * 1024 * 1024;
 
@@ -146,6 +161,45 @@ async function toggleVoiceCapture() {
   }
 }
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const svgNode = (name, attributes) => {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, value);
+  return node;
+};
+
+/**
+ * Build one SVG group per arm and per goal.
+ *
+ * The cell is either one arm or two, so the scene graph is rebuilt only when
+ * the loaded task changes that count rather than on every frame.
+ */
+function renderSceneGraph() {
+  $('#arms').replaceChildren(...activeArms().map(({ arm }) => {
+    const group = svgNode('g', { class: 'arm', 'data-arm': arm.id });
+    group.append(
+      svgNode('path', { class: 'arm-shadow' }),
+      svgNode('path', { class: 'arm-link' }),
+      svgNode('g', { class: 'joints' }),
+      svgNode('g', { class: 'gripper' }),
+    );
+    return group;
+  }));
+  $('#goals').replaceChildren(...activeArms().map(({ arm }) => {
+    const group = svgNode('g', { class: 'goal', 'data-arm': arm.id });
+    group.append(
+      svgNode('circle', { class: 'goal-ring', r: 23 }),
+      svgNode('path', { class: 'goal-cross', d: '' }),
+      svgNode('rect', { class: 'cube-shadow', x: -12, y: -12, width: 24, height: 24, rx: 4 }),
+      svgNode('rect', { class: 'cube', x: -12, y: -12, width: 24, height: 24, rx: 4 }),
+      svgNode('text', { class: 'goal-z', x: 0, y: -34, 'text-anchor': 'middle' }),
+    );
+    return group;
+  }));
+  $('#arm-switch').innerHTML = activeArms().map(({ arm }, index) => `<button class="arm-chip ${index === state.activeArm ? 'active' : ''}" data-arm-index="${index}">Arm ${arm.id}</button>`).join('');
+  setHidden($('#arm-switch'), state.armCount < 2);
+}
+
 function replayEpisode() {
   if (!state.transitions.length || state.replaying) return;
   state.replaying = true;
@@ -153,12 +207,17 @@ function replayEpisode() {
   let index = 0;
   const run = () => {
     const transition = state.transitions[index];
-    state.q = transition.observation.slice(0, 6);
-    state.lastAction = transition.action_after_safety_clamp.slice(0, 6);
+    activeArms().forEach((armState, armIndex) => {
+      const block = transition.observation.slice(armIndex * 22, armIndex * 22 + 22);
+      if (block.length < 22) return;
+      armState.q = block.slice(0, 6);
+      armState.goal = block.slice(19, 22);
+      armState.lastAction = transition.action_after_safety_clamp.slice(armIndex * 7, armIndex * 7 + 6);
+    });
     state.step = transition.index;
-    syncSliders(); updateArm();
+    syncSliders(); updateArms();
     index += 1;
-    if (index < state.transitions.length) setTimeout(run, 1000 / compiled.environment.control_hz);
+    if (index < state.transitions.length) setTimeout(run, 1000 / compiled.environment.control_hz / state.policy.speed);
     else { state.replaying = false; $('#replay').textContent = '↻ Replay episode'; }
   };
   if (state.voice.dataUrl) new Audio(state.voice.dataUrl).play().catch(() => {});
@@ -174,10 +233,9 @@ function importEpisode(file) {
   reader.onload = () => {
     try {
       const artifact = JSON.parse(reader.result);
-      if (!Array.isArray(artifact.transitions) || !artifact.transitions.every((entry) => Array.isArray(entry.observation) && entry.observation.length >= 6)) throw new Error('invalid episode');
+      if (!Array.isArray(artifact.transitions) || !artifact.transitions.every((entry) => Array.isArray(entry.observation) && entry.observation.length >= 22)) throw new Error('invalid episode');
       state.transitions = artifact.transitions;
-      state.currentWorkflow = compiled.workflows.find((workflow) => workflow.id === artifact.task?.id) || state.currentWorkflow;
-      if (artifact.task?.goal) setGoal(...artifact.task.goal);
+      if (artifact.task?.id) loadWorkflow(artifact.task.id);
       state.voice.transcript = artifact.voice?.transcript || '';
       $('#transcript').value = state.voice.transcript;
       setVoiceAudio(artifact.voice?.audio_data_url || null, artifact.voice?.mime_type);
@@ -192,75 +250,144 @@ function importEpisode(file) {
   reader.readAsText(file);
 }
 
-function updateArm() {
-  const { points, angle } = forwardKinematics(state.q);
-  const line = points.map(([px, py], index) => `${index ? 'L' : 'M'}${px} ${py}`).join(' ');
-  $('#arm-link').setAttribute('d', line);
-  $('#arm-shadow').setAttribute('d', line);
-  joints.replaceChildren(...points.map(([x, y], i) => {
-    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    circle.setAttribute('cx', x); circle.setAttribute('cy', y); circle.setAttribute('r', i === 0 ? 14 : i === points.length - 1 ? 9 : 11);
-    circle.setAttribute('class', i === points.length - 1 ? 'joint small' : 'joint');
-    return circle;
-  }));
-  const [x, y] = points.at(-1);
-  const rad = 0.35;
-  gripper.innerHTML = `<path class="grip" d="M${x} ${y} l${Math.cos(angle + rad) * 19} ${Math.sin(angle + rad) * 19} M${x} ${y} l${Math.cos(angle - rad) * 19} ${Math.sin(angle - rad) * 19}"/>`;
+/** The top-down scene cannot show height directly, so it is drawn as a cast shadow. */
+const shadowOffset = (height) => height * 0.11;
+const castShadow = ([x, y, z]) => [x + shadowOffset(z) * 0.4, y + shadowOffset(z)];
+
+function updateArms() {
+  const armGroups = [...$('#arms').children];
+  activeArms().forEach((armState, index) => {
+    const group = armGroups[index];
+    if (!group) return;
+    const { points, forward } = forwardKinematics(armState.q, armState.arm);
+    const path = (project) => points.map((point, pointIndex) => {
+      const [px, py] = project(point);
+      return `${pointIndex ? 'L' : 'M'}${px} ${py}`;
+    }).join(' ');
+    group.querySelector('.arm-link').setAttribute('d', path((point) => point));
+    group.querySelector('.arm-shadow').setAttribute('d', path(castShadow));
+    group.querySelector('.joints').replaceChildren(...points.map(([x, y, z], pointIndex) => svgNode('circle', {
+      cx: x, cy: y,
+      // Height reads as scale in a top-down view: a raised joint is nearer the camera.
+      r: (pointIndex === 0 ? 14 : pointIndex === points.length - 1 ? 9 : 11) * (1 + z / 900),
+      class: pointIndex === points.length - 1 ? 'joint small' : 'joint',
+    })));
+    const [x, y] = points.at(-1);
+    // The tool heading seen from above is the forward vector's ground projection.
+    const heading = Math.atan2(forward[1], forward[0]);
+    const spread = 0.35;
+    group.querySelector('.gripper').innerHTML = `<path class="grip" d="M${x} ${y} l${Math.cos(heading + spread) * 19} ${Math.sin(heading + spread) * 19} M${x} ${y} l${Math.cos(heading - spread) * 19} ${Math.sin(heading - spread) * 19}"/>`;
+  });
+  updateGoals();
   pushViewportState();
-  updateTelemetry(points.at(-1));
+  updateTelemetry();
+}
+
+function updateGoals() {
+  const goalGroups = [...$('#goals').children];
+  activeArms().forEach((armState, index) => {
+    const group = goalGroups[index];
+    if (!group) return;
+    const [x, y, z] = armState.goal;
+    const [shadowX, shadowY] = castShadow(armState.goal);
+    group.querySelector('.goal-ring').setAttribute('cx', x);
+    group.querySelector('.goal-ring').setAttribute('cy', y);
+    group.querySelector('.goal-cross').setAttribute('d', `M${x - 20} ${y}h40M${x} ${y - 20}v40`);
+    group.querySelector('.cube-shadow').setAttribute('transform', `translate(${shadowX} ${shadowY})`);
+    group.querySelector('.cube').setAttribute('transform', `translate(${x} ${y}) scale(${1 + z / 600})`);
+    const label = group.querySelector('.goal-z');
+    label.setAttribute('transform', `translate(${x} ${y})`);
+    label.textContent = `${armState.arm.id} · z ${fmt(z / 10, 1)} cm`;
+  });
 }
 
 function pushViewportState() {
-  viewport.instance?.update({ q: [...state.q], goal: [...state.goal] });
+  viewport.instance?.update({
+    arms: activeArms().map((armState) => ({
+      id: armState.arm.id,
+      q: [...armState.q],
+      goal: [...armState.goal],
+    })),
+  });
 }
 
-function updateTelemetry(ee) {
-  const goalDistance = distance(ee, state.goal);
-  const reward = -goalDistance / 100 - 0.001 * state.q.reduce((sum, q) => sum + q * q, 0);
-  $('#distance').textContent = `${fmt(goalDistance / 10, 1)} cm`;
+const tipOf = (armState) => forwardKinematics(armState.q, armState.arm).points.at(-1);
+const armError = (armState) => distance(tipOf(armState), armState.goal);
+
+function updateTelemetry() {
+  const errors = activeArms().map(armError);
+  const worst = Math.max(...errors);
+  const reward = -worst / 100 - 0.001 * activeArms().reduce((sum, armState) => sum + armState.q.reduce((inner, q) => inner + q * q, 0), 0);
+  $('#distance').textContent = state.armCount > 1
+    ? `${errors.map((error, index) => `${state.arms[index].arm.id} ${fmt(error / 10, 1)}`).join(' / ')} cm`
+    : `${fmt(worst / 10, 1)} cm`;
+  $('#tool-height').textContent = activeArms().map((armState) => `${fmt(tipOf(armState)[2] / 10, 1)}`).join(' / ') + ' cm';
   $('#reward').textContent = fmt(reward, 3);
   $('#step').textContent = `${state.step} / ${compiled.environment.max_steps}`;
-  $('#reward-bar').style.width = `${clamp(100 - goalDistance / 2.7, 0, 100)}%`;
-  $('#reward-bar-value').textContent = `${Math.round(clamp(100 - goalDistance / 2.7, 0, 100))}%`;
-  $('#safety-state').textContent = state.q.some((v) => Math.abs(v) >= ARM.jointLimit) ? 'At a joint limit' : 'Within limits';
-  $('#safety-state').style.color = state.q.some((v) => Math.abs(v) >= ARM.jointLimit) ? '#b04a24' : '#45861a';
+  const score = clamp(100 - worst / 2.7, 0, 100);
+  $('#reward-bar').style.width = `${score}%`;
+  $('#reward-bar-value').textContent = `${Math.round(score)}%`;
+  const atLimit = activeArms().some((armState) => armState.q.some((value, index) => Math.abs(value) >= jointLimitOf(index) - 1e-6));
+  $('#safety-state').textContent = atLimit ? 'At a joint limit' : 'Within limits';
+  $('#safety-state').style.color = atLimit ? '#b04a24' : '#45861a';
 }
 
 function syncSliders() {
-  [...sliders.querySelectorAll('input')].forEach((input, index) => { input.value = state.q[index]; input.nextElementSibling.value = fmt(state.q[index]); });
+  const armState = controlledArm();
+  [...sliders.querySelectorAll('input[data-joint]')].forEach((input, index) => {
+    input.value = armState.q[index];
+    input.nextElementSibling.value = fmt(armState.q[index]);
+  });
+  const goalZ = sliders.querySelector('#goal-z');
+  if (goalZ) { goalZ.value = armState.goal[2]; goalZ.nextElementSibling.value = `${fmt(armState.goal[2] / 10, 1)} cm`; }
 }
 
-function setGoal(x, y) {
-  state.goal = projectToReachableWorkspace([x, y], compiled.environment.safety, ARM);
-  state.guidancePlan = solveInverseKinematics(state.goal, ARM);
-  $('#goal-ring').setAttribute('cx', state.goal[0]); $('#goal-ring').setAttribute('cy', state.goal[1]);
-  $('#goal-cross').setAttribute('d', `M${state.goal[0] - 20} ${state.goal[1]}h40M${state.goal[0]} ${state.goal[1] - 20}v40`);
-  $('#object').setAttribute('transform', `translate(${state.goal[0]} ${state.goal[1]})`);
-  updateArm();
+function setArmGoal(armState, point) {
+  armState.goal = projectToReachableWorkspace(point, compiled.environment.safety, armState.arm);
+  armState.plan = solveInverseKinematics(armState.goal, armState.arm);
+}
+
+/** Route a scene click to the arm whose base column is nearest, keeping its goal height. */
+function setGoalFromScene(point) {
+  const arm = nearestArm(point, activeArms().map((armState) => armState.arm));
+  const armState = state.arms.find((candidate) => candidate.arm.id === arm.id);
+  setArmGoal(armState, [point[0], point[1], armState.goal[2]]);
+  updateArms();
+  syncSliders();
 }
 
 function addTransition() {
   if (!state.recording) return;
   if (state.transitions.length >= MAX_EPISODE_TRANSITIONS) {
-    state.recording = false;
-    $('#record').textContent = '● Record';
+    stopRecording();
     return;
   }
-  const { points } = forwardKinematics(state.q);
-  const [x, y] = points.at(-1);
+  const observation = [];
+  const action = [];
+  for (const armState of activeArms()) {
+    const [x, y, z] = tipOf(armState);
+    observation.push(...armState.q, ...Array(6).fill(0), x, y, z, 1, 0, 0, 0, ...armState.goal);
+    action.push(...armState.lastAction, 0);
+  }
   state.transitions.push({
-    index: state.step, timestamp_ms: Math.round(performance.now() - state.startedAt),
-    observation: [...state.q, ...Array(6).fill(0), x, y, 0, 1, 0, 0, 0, state.goal[0], state.goal[1], 0],
-    action: [...state.lastAction, 0], action_after_safety_clamp: [...state.lastAction, 0],
-    task: state.currentWorkflow.id, reward: -distance([x, y], state.goal) / 100,
+    index: state.step,
+    timestamp_ms: Math.round(performance.now() - state.startedAt),
+    observation,
+    action: [...action],
+    action_after_safety_clamp: [...action],
+    task: state.currentWorkflow.id,
+    arms: state.armCount,
+    reward: -Math.max(...activeArms().map(armError)) / 100,
   });
   $('#recording-count').textContent = state.transitions.length;
   $('#download').disabled = false;
   $('#replay').disabled = false;
-  if (state.transitions.length === MAX_EPISODE_TRANSITIONS) {
-    state.recording = false;
-    $('#record').textContent = '● Record';
-  }
+  if (state.transitions.length === MAX_EPISODE_TRANSITIONS) stopRecording();
+}
+
+function stopRecording() {
+  state.recording = false;
+  $('#record').textContent = '● Record';
 }
 
 /* ---------- viewports ---------- */
@@ -272,7 +399,7 @@ async function mountViewport3D() {
     const { createViewport3D } = await import('./viewport3d.js');
     const instance = createViewport3D($('#stage-3d'), {
       workspace: compiled.environment.safety,
-      onGoalPick: (point) => setGoal(...point),
+      onGoalPick: (point) => setGoalFromScene(point),
     });
     viewport.instance = instance;
     pushViewportState();
@@ -388,12 +515,21 @@ function renderStudyPath() {
 }
 
 function loadWorkflow(id, { scroll = false } = {}) {
+  haltPolicy(HALT.IDLE, { silent: true });
   state.currentWorkflow = compiled.workflows.find((workflow) => workflow.id === id) || compiled.workflows[0];
-  $('#scenario').value = state.currentWorkflow.id;
-  $('#scenario-instruction').textContent = `“${state.currentWorkflow.instruction}” — ${state.currentWorkflow.metric}`;
+  const workflow = state.currentWorkflow;
+  state.armCount = workflow.arms || 1;
+  state.activeArm = 0;
+  setArmGoal(state.arms[0], [...workflow.goal, workflow.goal_height]);
+  setArmGoal(state.arms[1], [...(workflow.goal_b || workflow.goal), workflow.goal_height]);
+  $('#scenario').value = workflow.id;
+  $('#scenario-instruction').textContent = `“${workflow.instruction}” — ${workflow.metric}`;
+  $('#arm-count').textContent = state.armCount > 1 ? 'Bimanual · 2 arms' : 'Single arm';
+  renderSceneGraph();
   renderTaskList();
   renderTaskDetail();
-  setGoal(...state.currentWorkflow.goal);
+  updateArms();
+  syncSliders();
   if (scroll) $('#demo').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -404,28 +540,116 @@ function renderScenarioSelect() {
   }).join('');
 }
 
-function demoPolicy() {
-  if (state.running) return;
-  state.running = true; $('#run-policy').textContent = 'Policy running…';
-  let frames = 0;
-  const horizon = Math.min(state.currentWorkflow.horizon_steps || compiled.environment.max_steps, compiled.environment.max_steps);
-  const run = () => {
-    const guided = guidedStep(state.q, state.goal, ARM, state.guidancePlan);
-    state.q = guided.q; state.lastAction = guided.action;
-    state.step += 1; syncSliders(); updateArm(); addTransition(); frames += 1;
-    if (frames < horizon && guided.distance > 8 && state.step < compiled.environment.max_steps) requestAnimationFrame(run);
-    else { state.running = false; $('#run-policy').textContent = 'Run demo policy'; }
-  };
-  requestAnimationFrame(run);
+const HALT_COPY = {
+  [HALT.IDLE]: () => 'Idle · policy not running',
+  [HALT.RUNNING]: () => `Running · step ${state.policy.steps}`,
+  [HALT.REACHED]: () => `Halted · goal reached in ${state.policy.steps} steps`,
+  [HALT.BUDGET]: () => `Halted · step budget exhausted at ${state.policy.steps}`,
+  [HALT.OPERATOR]: () => `Halted by operator at step ${state.policy.steps}`,
+};
+
+function renderHaltState() {
+  const element = $('#halt-state');
+  element.textContent = HALT_COPY[state.policy.status]();
+  element.className = `halt-state ${state.policy.status}`;
+  $('#run-policy').textContent = state.policy.status === HALT.RUNNING ? '■ Halt policy' : 'Run demo policy';
+}
+
+/** One control step for every active arm: joints toward the plan, tool toward the goal height. */
+function policyStep() {
+  let error = 0;
+  for (const armState of activeArms()) {
+    const guided = guidedStep(armState.q, armState.goal, armState.arm, armState.plan);
+    armState.q = guided.q;
+    armState.lastAction = guided.action;
+    error = Math.max(error, guided.distance);
+  }
+  state.step += 1;
+  state.policy.steps += 1;
+  syncSliders();
+  updateArms();
+  addTransition();
+  return haltState({ error, steps: state.policy.steps, budget: policyBudget() });
+}
+
+const policyBudget = () => Math.min(state.currentWorkflow.horizon_steps || compiled.environment.max_steps, compiled.environment.max_steps);
+
+/**
+ * Advance the run by `speed` control steps per animation frame.
+ *
+ * A fractional speed spreads one step across several frames, so the same
+ * accumulator serves slow-motion inspection and fast-forwarding a long reach.
+ */
+function policyFrame() {
+  state.policy.accumulator += state.policy.speed;
+  let status = HALT.RUNNING;
+  while (state.policy.accumulator >= 1 && status === HALT.RUNNING) {
+    state.policy.accumulator -= 1;
+    status = policyStep();
+  }
+  renderHaltState();
+  if (status === HALT.RUNNING) {
+    state.policy.frame = requestAnimationFrame(policyFrame);
+    return;
+  }
+  settlePolicy(status);
+}
+
+function settlePolicy(status) {
+  state.policy.frame = null;
+  state.policy.status = status;
+  renderHaltState();
+  if (status === HALT.REACHED && state.policy.loop) {
+    state.policy.restart = setTimeout(() => { state.policy.restart = null; resetArms(); startPolicy(); }, 700);
+  }
+}
+
+function startPolicy() {
+  if (state.policy.status === HALT.RUNNING) return;
+  clearTimeout(state.policy.restart);
+  state.policy.restart = null;
+  state.policy.status = HALT.RUNNING;
+  state.policy.steps = 0;
+  state.policy.accumulator = 0;
+  renderHaltState();
+  state.policy.frame = requestAnimationFrame(policyFrame);
+}
+
+function haltPolicy(status = HALT.OPERATOR, { silent = false } = {}) {
+  if (state.policy.frame !== null) cancelAnimationFrame(state.policy.frame);
+  clearTimeout(state.policy.restart);
+  state.policy.frame = null;
+  state.policy.restart = null;
+  if (silent) { state.policy.status = HALT.IDLE; state.policy.steps = 0; }
+  else state.policy.status = status;
+  renderHaltState();
+}
+
+function resetArms() {
+  for (const armState of state.arms) {
+    armState.q = [...HOME_POSE];
+    armState.lastAction = Array(6).fill(0);
+  }
+  state.step = 0;
+  syncSliders();
+  updateArms();
 }
 
 function installListeners() {
   $('#scene').addEventListener('pointerdown', (event) => {
-    const rect = event.currentTarget.getBoundingClientRect(); const x = (event.clientX - rect.left) / rect.width * 760; const y = (event.clientY - rect.top) / rect.height * 490; setGoal(x, y);
+    const rect = event.currentTarget.getBoundingClientRect();
+    setGoalFromScene([(event.clientX - rect.left) / rect.width * 760, (event.clientY - rect.top) / rect.height * 490]);
   });
   $('#view-2d').addEventListener('click', () => setViewportMode('2d'));
   $('#view-3d').addEventListener('click', () => setViewportMode('3d'));
   $('#scenario').addEventListener('change', (event) => loadWorkflow(event.target.value));
+  $('#arm-switch').addEventListener('click', (event) => {
+    const index = event.target.dataset.armIndex;
+    if (index === undefined) return;
+    state.activeArm = Number(index);
+    [...$('#arm-switch').children].forEach((chip, chipIndex) => chip.classList.toggle('active', chipIndex === state.activeArm));
+    syncSliders();
+  });
   $('#family-filters').addEventListener('click', (event) => {
     const family = event.target.dataset.family;
     if (!family) return;
@@ -447,10 +671,22 @@ function installListeners() {
     state.modelFilter = route;
     renderModels();
   });
-  $('#run-policy').addEventListener('click', demoPolicy);
-  $('#reset').addEventListener('click', () => { state.q = [-0.45, 0.2, 0.3, -0.2, -0.1, 0.15]; state.lastAction = Array(6).fill(0); state.step = 0; state.running = false; syncSliders(); updateArm(); });
+  $('#run-policy').addEventListener('click', () => {
+    if (state.policy.status === HALT.RUNNING) haltPolicy(HALT.OPERATOR);
+    else startPolicy();
+  });
+  $('#policy-speed').addEventListener('input', (event) => {
+    state.policy.speed = Number(event.target.value);
+    $('#policy-speed-value').textContent = `${fmt(state.policy.speed)}×`;
+  });
+  $('#policy-loop').addEventListener('change', (event) => {
+    state.policy.loop = event.target.checked;
+    if (!state.policy.loop) { clearTimeout(state.policy.restart); state.policy.restart = null; }
+    else if (state.policy.status === HALT.REACHED) settlePolicy(HALT.REACHED);
+  });
+  $('#reset').addEventListener('click', () => { haltPolicy(HALT.IDLE, { silent: true }); resetArms(); });
   $('#record').addEventListener('click', () => {
-    if (state.recording) { state.recording = false; $('#record').textContent = '● Record'; return; }
+    if (state.recording) { stopRecording(); return; }
     state.transitions = []; state.step = 0; state.recording = true;
     $('#recording-count').textContent = '0'; $('#download').disabled = true; $('#replay').disabled = true;
     $('#record').textContent = '■ Stop recording';
@@ -462,17 +698,48 @@ function installListeners() {
   $('#import').addEventListener('click', () => $('#import-file').click());
   $('#import-file').addEventListener('change', (event) => { if (event.target.files[0]) importEpisode(event.target.files[0]); event.target.value = ''; });
   $('#download').addEventListener('click', () => {
-    const artifact = buildEpisodeArtifact({ environment: compiled.environment.id, task: state.currentWorkflow, transitions: state.transitions, voice: state.voice });
-    const url = URL.createObjectURL(new Blob([JSON.stringify(artifact, null, 2)], {type:'application/json'})); const link = document.createElement('a'); link.href = url; link.download = `armlab-${state.currentWorkflow.id}-${Date.now()}.json`; link.click(); URL.revokeObjectURL(url);
+    const artifact = buildEpisodeArtifact({
+      environment: compiled.environment.id,
+      task: state.currentWorkflow,
+      transitions: state.transitions,
+      voice: state.voice,
+      arms: state.armCount,
+      halt: state.policy.status,
+    });
+    const url = URL.createObjectURL(new Blob([JSON.stringify(artifact, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url; link.download = `armlab-${state.currentWorkflow.id}-${Date.now()}.json`; link.click();
+    URL.revokeObjectURL(url);
   });
   document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => { document.querySelectorAll('.tab,.tab-content').forEach((el) => el.classList.remove('active')); tab.classList.add('active'); $(`#${tab.dataset.tab}`).classList.add('active'); }));
 }
 
 function makeSliders() {
-  sliders.innerHTML = state.q.map((q, i) => `<label class="slider">J${i + 1}<input type="range" min="-${ARM.jointLimit}" max="${ARM.jointLimit}" step="0.01" value="${q}" aria-label="Joint ${i + 1} target"/><output>${fmt(q)}</output></label>`).join('');
-  [...sliders.querySelectorAll('input')].forEach((input, index) => input.addEventListener('input', () => { const previous = state.q[index]; state.q[index] = Number(input.value); state.lastAction = Array(6).fill(0); state.lastAction[index] = clamp(state.q[index] - previous, -ARM.maxActionDelta, ARM.maxActionDelta); state.step += 1; input.nextElementSibling.value = fmt(state.q[index]); updateArm(); addTransition(); }));
+  const jointRows = HOME_POSE.map((value, index) => `<label class="slider">${JOINT_LABELS[index]}<input data-joint="${index}" type="range" min="${-jointLimitOf(index)}" max="${jointLimitOf(index)}" step="0.01" value="${value}" aria-label="${index === 0 ? 'Base yaw' : `Joint ${index + 1}`} target"/><output>${fmt(value)}</output></label>`).join('');
+  sliders.innerHTML = `${jointRows}<label class="slider goal-z-slider">Goal Z<input id="goal-z" type="range" min="${GOAL_Z.min}" max="${GOAL_Z.max}" step="1" value="${GOAL_Z.rest}" aria-label="Goal height above the table"/><output>${fmt(GOAL_Z.rest / 10, 1)} cm</output></label>`;
+
+  [...sliders.querySelectorAll('input[data-joint]')].forEach((input, index) => input.addEventListener('input', () => {
+    const armState = controlledArm();
+    const previous = armState.q[index];
+    armState.q[index] = Number(input.value);
+    armState.lastAction = Array(6).fill(0);
+    armState.lastAction[index] = clamp(armState.q[index] - previous, -ARM.maxActionDelta, ARM.maxActionDelta);
+    state.step += 1;
+    input.nextElementSibling.value = fmt(armState.q[index]);
+    updateArms();
+    addTransition();
+  }));
+
+  // Height is the axis the top-down scene cannot offer: raise or lower the goal itself.
+  sliders.querySelector('#goal-z').addEventListener('input', (event) => {
+    const armState = controlledArm();
+    setArmGoal(armState, [armState.goal[0], armState.goal[1], Number(event.target.value)]);
+    event.target.nextElementSibling.value = `${fmt(armState.goal[2] / 10, 1)} cm`;
+    updateArms();
+  });
 }
 
 renderScenarioSelect(); renderFamilyFilters(); renderModels(); renderDatasets(); renderStudyPath(); makeSliders(); installListeners();
 loadWorkflow(compiled.workflows[0].id);
+renderHaltState();
 setInterval(() => { $('#sim-time').textContent = `T + ${fmt((performance.now() - state.startedAt) / 1000, 1).padStart(4, '0')} s`; }, 100);

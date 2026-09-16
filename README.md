@@ -36,21 +36,40 @@ Eleven examples ship in `data/compiled.json`, grouped into six families: basics,
 | `failure_modes` | What is known to go wrong, so evaluation looks for it |
 | `guardrail` | The safety boundary that is not the policy's to decide |
 | `difficulty`, `horizon_steps`, `baseline` | Planning metadata and the smallest policy worth trying first |
+| `arms`, `goal`, `goal_b`, `goal_height` | One gripper or two, and where in space each one works |
 
-Every example is reachable in the browser lab: `npm test` asserts that each goal lies inside the declared workspace, is IK-plannable, and keeps a complete specification.
+Every example is reachable in the browser lab: `npm test` asserts that each goal lies inside the declared workspace and reach shell, is reached in three dimensions by both the solver and the tracking controller, and keeps a complete specification.
 
 The task families, curricula, safety boundaries, model map, and study path were folded in from the local **Arm Atlas — 6-DOF Learning Lab** study dashboard, which now lives on as a side piece to this repository.
+
+## The arm
+
+The chain is a real spatial one. Each joint turns about an axis of its own moving frame — yaw, pitch, pitch, yaw, pitch, roll — so a pose has a genuine height and lateral offset, and the arm bends out of any single plane. Both viewports are views of that one chain.
+
+Goals are points in space: `x`, `y`, and a height above the table that each task declares and the **Goal Z** slider changes. The solver takes yaw from geometry and searches the remaining joints with multi-start CCD; guidance then tracks the plan under a per-step joint-delta cap.
+
+A goal is projected into the arm's reach shell before it is used. The shell has an inner wall as well as an outer one — an articulated arm cannot fold back to touch its own shoulder, and the higher a goal sits the further out that wall moves. The correction is horizontal, so raising a goal slides it away from the column instead of dropping it back onto the table.
+
+### Two arms
+
+Tasks that genuinely need two grippers declare `arms: 2` and a second goal: towel fold, safe handoff, and table reset. The right-hand arm is the same manipulator mirrored about its own base column, so one joint vector describes either posture and one solver serves both. Clicking the scene moves the goal of whichever arm's base column is nearest; the **Arm A / Arm B** switch chooses which arm the joint sliders drive. A bimanual episode records both arms — 44 observation features and 14 action dimensions instead of 22 and 7.
 
 ## Viewports
 
 The lab stage renders the same arm two ways, switched by the **2D / 3D** control:
 
-- **2D** — the top-down SVG scene. Click anywhere to move the goal.
-- **3D** — a three.js viewport. Drag to orbit, scroll to zoom, click the floor to move the goal.
-
-The 3-D view is a spatial rendering of the *same* planar chain, not a second simulation: the top-down footprint matches the SVG exactly, and links are stacked at descending heights the way a SCARA-style arm is built. It adds no kinematics, collision model, or physics the 2-D scene does not already have.
+- **2D** — the top-down SVG scene. Click anywhere to move the nearest arm's goal. Height shows as a cast shadow, as joint scale, and as a readout, because a top-down view cannot show it directly.
+- **3D** — a three.js viewport. Drag to orbit, scroll to zoom, click the floor to move the goal. This is where height is literal: the column, the arc of the elbow, and the object floating above its floor marker are all real coordinates.
 
 three.js is loaded on demand. It sits in its own lazy chunk, so the initial page load is unchanged for anyone who never opens the 3-D view, and a browser without working WebGL falls back to the 2-D scene with a message instead of a broken stage.
+
+## Running a policy
+
+The demo planner is a transparent geometric controller, and a run is bounded rather than open-ended:
+
+- **Halt state.** Every run ends in a named state — *goal reached* with the step count, *step budget exhausted*, or *halted by operator* — so a success is never confused with a run that simply gave up. The run button becomes a halt button while a policy is moving.
+- **Speed.** A slider advances the run between 0.25× and 8× control steps per frame: slow enough to watch a correction, fast enough to skip a long reach.
+- **Loop.** With loop on, a successful run returns the arms to the home pose and repeats, which is how you watch a task for repeatability rather than for one lucky episode.
 
 ## Model and data direction
 
