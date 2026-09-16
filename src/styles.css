@@ -38,3 +38,19 @@
 .study-card a{font-size:19px;letter-spacing:-.8px;color:var(--lime);text-decoration:none}.study-card a:hover{text-decoration:underline}
 .study-card p{font-size:13px;line-height:1.55;color:#93a0b1;margin:0}
 @media(max-width:980px){.task-layout{grid-template-columns:1fr}.task-list{flex-direction:row;overflow-x:auto;max-height:none}.task-button{min-width:210px;border-bottom:0;border-right:1px solid #e2ded6}.study-list{grid-template-columns:1fr}.task-spec{grid-template-columns:1fr}.task-spec dd{padding-top:0;border-top:0}}
+.scene-label b{color:var(--lime);font-weight:500}
+.policy-bar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:12px 2px 0;border-top:1px solid #1e2836;margin-top:11px}
+.halt-state{font:10px var(--mono);letter-spacing:.4px;padding:5px 10px;border:1px solid #334054;color:#9ba6b7}
+.halt-state.running{border-color:#c9fb5d;color:#c9fb5d}.halt-state.reached{border-color:#79c845;color:#a9e87a}.halt-state.budget{border-color:#c08a3a;color:#ffbd4a}.halt-state.operator{border-color:#8d5a4a;color:#e0a08c}
+.policy-speed{display:flex;align-items:center;gap:9px;font:10px var(--mono);color:#9ba6b7;margin-left:auto}
+.policy-speed input{width:120px;accent-color:#c9fb5d}.policy-speed output{min-width:44px;text-align:right;color:#dfe6ee}
+.policy-loop{display:flex;align-items:center;gap:6px;font:10px var(--mono);color:#9ba6b7;cursor:pointer}.policy-loop input{accent-color:#c9fb5d}
+.arm-switch{display:flex;gap:6px;margin:0 0 14px}
+.arm-chip{flex:1;border:1px solid #cbc6be;background:#fffdfa;font:11px var(--mono);padding:8px;cursor:pointer;transition:.15s}
+.arm-chip:hover{border-color:var(--ink)}.arm-chip.active{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.goal-z-slider{border-top:1px solid #cbc6be;margin-top:4px;grid-template-columns:42px 1fr 52px}.goal-z-slider input{accent-color:#c08a3a}
+.cube-shadow{fill:#05080e;opacity:.55}
+.goal-z{font:9px var(--mono);fill:#ffbd4a;letter-spacing:.4px}
+.arm[data-arm="B"] .arm-link{stroke:#69d2df}.arm[data-arm="B"] .joint{stroke:#a6e6ef}.arm[data-arm="B"] .joint.small{fill:#69d2df}.arm[data-arm="B"] .grip{stroke:#a6e6ef}
+.goal[data-arm="B"] .cube{fill:#69d2df;stroke:#bfeef4}.goal[data-arm="B"] .goal-ring{stroke:#69d2df;fill:#69d2df18}.goal[data-arm="B"] .goal-cross{stroke:#a6e6ef}.goal[data-arm="B"] .goal-z{fill:#69d2df}
+@media(max-width:850px){.policy-speed{margin-left:0}.policy-speed input{width:90px}}
