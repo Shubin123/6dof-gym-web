@@ -59,7 +59,9 @@ Tasks that genuinely need two grippers declare `arms: 2` and a second goal: towe
 The lab stage renders the same arm two ways, switched by the **2D / 3D** control:
 
 - **2D** — the top-down SVG scene. Click anywhere to move the nearest arm's goal. Height shows as a cast shadow, as joint scale, and as a readout, because a top-down view cannot show it directly.
-- **3D** — a three.js viewport. Drag to orbit, scroll to zoom, click the floor to move the goal. This is where height is literal: the column, the arc of the elbow, and the object floating above its floor marker are all real coordinates.
+- **3D** — a three.js viewport. Drag to orbit, scroll to zoom, click the floor to move a goal, and **drag a cube up or down to set its height**. This is where height is literal: the column, the arc of the elbow, and the object floating above its floor marker are all real coordinates.
+
+Hovering a cube raises an arrow above and below it and switches the cursor; grabbing one takes hold of the point you clicked, so the object tracks the pointer without jumping, and the orbit camera stands still for the duration of the drag. Dragging a cube also makes that arm the one the joint sliders drive, and the **Goal Z** slider follows along. The solver runs once on release rather than on every pointer move, which keeps a full IK search out of the drag loop.
 
 three.js is loaded on demand. It sits in its own lazy chunk, so the initial page load is unchanged for anyone who never opens the 3-D view, and a browser without working WebGL falls back to the 2-D scene with a message instead of a broken stage.
 
