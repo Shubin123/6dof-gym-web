@@ -1,10 +1,19 @@
 {
-  "updated_at": "2026-09-12",
+  "updated_at": "2026-09-16",
   "sources": [
     {"id":"lerobot-smolvla","title":"LeRobot SmolVLA documentation","publisher":"Hugging Face","url":"https://huggingface.co/docs/lerobot/smolvla","used_for":"model interface, fine-tuning and SO-101 example guidance"},
     {"id":"lerobot-hardware","title":"LeRobot SO-101 teleoperation guide","publisher":"Hugging Face","url":"https://huggingface.co/docs/lerobot/il_robots","used_for":"SO-101 leader/follower operating model"},
     {"id":"pi0-paper","title":"π₀: A Vision-Language-Action Flow Model for General Robot Control","publisher":"Physical Intelligence","url":"https://www.physicalintelligence.company/download/pi0.pdf","used_for":"generalist VLA research reference"},
     {"id":"lerobot-dataset","title":"LeRobotDataset v3 documentation","publisher":"Hugging Face","url":"https://huggingface.co/docs/lerobot/lerobot-dataset-v3","used_for":"recording format and dataset interoperability"},
-    {"id":"vault","title":"6-DOF gym on the web design pack","publisher":"Local Obsidian vault","url":"file:///Users/admin/Library/Mobile%20Documents/iCloud~md~obsidian/Documents/6dof_gym_vault/README.md","used_for":"architecture, safety, task-spec and deployment direction"}
+    {"id":"vault","title":"6-DOF gym on the web design pack","publisher":"Local Obsidian vault","url":"file:///Users/admin/Library/Mobile%20Documents/iCloud~md~obsidian/Documents/6dof_gym_vault/README.md","used_for":"architecture, safety, task-spec and deployment direction"},
+    {"id":"arm-atlas","title":"Arm Atlas — 6-DOF Learning Lab","publisher":"Local study dashboard","url":"file:///~/Documents/arms_gym/README.md","used_for":"task-family library, capability curricula, safety boundaries and the model map folded into this repository"}
+  ],
+  "study_path": [
+    {"stage":"HANDS-ON","title":"Hugging Face LeRobot","blurb":"Robot datasets, policies including ACT, Diffusion Policy and VLAs, plus practical hardware guides.","url":"https://huggingface.co/docs/lerobot/index"},
+    {"stage":"SIMULATION","title":"MuJoCo","blurb":"Fast, accessible physics simulation and canonical manipulator examples for testing trajectories before hardware.","url":"https://mujoco.org/"},
+    {"stage":"MOTION PLANNING","title":"MoveIt 2","blurb":"ROS 2 planning, collision checking, trajectory execution, and visual tools for a physical 6-DOF arm.","url":"https://moveit.picknik.ai/main/index.html"},
+    {"stage":"SYNTHETIC DATA","title":"NVIDIA Isaac Lab","blurb":"GPU-accelerated robot learning simulation, domain randomization, and Isaac ecosystem integration.","url":"https://isaac-sim.github.io/IsaacLab/"},
+    {"stage":"OPEN GENERALIST","title":"OpenVLA","blurb":"Paper, checkpoints, and code for an open-source vision-language-action manipulation model.","url":"https://openvla.github.io/"},
+    {"stage":"VISUAL INTUITION","title":"Modern Robotics","blurb":"Free video-centred material for forward kinematics, Jacobians, trajectory generation, and control.","url":"https://modernrobotics.northwestern.edu/"}
   ]
 }

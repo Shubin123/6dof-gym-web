@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import compiled from '../data/compiled.json' with { type: 'json' };
+import registry from '../data/sources.json' with { type: 'json' };
 import { ARM, buildEpisodeArtifact, distance, forwardKinematics, guidedStep, MAX_EPISODE_TRANSITIONS, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
 
 test('compiled environment has the browser task contract', () => {
@@ -74,4 +75,37 @@ test('episode exports retain optional replayable voice fields', () => {
 
 test('browser episode buffer has a finite task-aligned bound', () => {
   assert.equal(MAX_EPISODE_TRANSITIONS, compiled.environment.max_steps);
+});
+
+test('every task example carries a complete, teachable specification', () => {
+  const families = new Set(compiled.families.map((family) => family.id));
+  const numbers = new Set();
+  for (const workflow of compiled.workflows) {
+    assert.ok(families.has(workflow.family), `${workflow.id} references an unknown family`);
+    assert.ok(!numbers.has(workflow.number), `${workflow.number} is used twice`);
+    numbers.add(workflow.number);
+    for (const field of ['name', 'instruction', 'metric', 'summary', 'success', 'sensors', 'guardrail']) {
+      assert.equal(typeof workflow[field], 'string', `${workflow.id} is missing ${field}`);
+      assert.ok(workflow[field].length > 8, `${workflow.id}.${field} is too thin to teach from`);
+    }
+    assert.ok(workflow.baseline?.length, `${workflow.id} should name a suggested baseline policy`);
+    assert.ok(workflow.curriculum.length >= 3, `${workflow.id} needs a curriculum with progression`);
+    assert.ok(workflow.failure_modes.length >= 2, `${workflow.id} needs its known failure modes`);
+    assert.ok(workflow.difficulty >= 1 && workflow.difficulty <= 5);
+    assert.ok(workflow.horizon_steps > 0 && workflow.horizon_steps <= compiled.environment.max_steps);
+  }
+});
+
+test('every task family is represented by at least one example', () => {
+  for (const family of compiled.families) {
+    assert.ok(compiled.workflows.some((workflow) => workflow.family === family.id), `${family.id} has no example`);
+  }
+});
+
+test('the study path and source registry keep resolvable references', () => {
+  for (const entry of registry.study_path) {
+    assert.match(entry.url, /^https:\/\//);
+    assert.ok(entry.stage && entry.title && entry.blurb);
+  }
+  assert.ok(registry.sources.every((source) => typeof source.used_for === 'string' && source.used_for.length > 0));
 });
