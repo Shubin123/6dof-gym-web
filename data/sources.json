@@ -4,9 +4,7 @@
     {"id":"lerobot-smolvla","title":"LeRobot SmolVLA documentation","publisher":"Hugging Face","url":"https://huggingface.co/docs/lerobot/smolvla","used_for":"model interface, fine-tuning and SO-101 example guidance"},
     {"id":"lerobot-hardware","title":"LeRobot SO-101 teleoperation guide","publisher":"Hugging Face","url":"https://huggingface.co/docs/lerobot/il_robots","used_for":"SO-101 leader/follower operating model"},
     {"id":"pi0-paper","title":"π₀: A Vision-Language-Action Flow Model for General Robot Control","publisher":"Physical Intelligence","url":"https://www.physicalintelligence.company/download/pi0.pdf","used_for":"generalist VLA research reference"},
-    {"id":"lerobot-dataset","title":"LeRobotDataset v3 documentation","publisher":"Hugging Face","url":"https://huggingface.co/docs/lerobot/lerobot-dataset-v3","used_for":"recording format and dataset interoperability"},
-    {"id":"vault","title":"6-DOF gym on the web design pack","publisher":"Local Obsidian vault","url":"file:///Users/admin/Library/Mobile%20Documents/iCloud~md~obsidian/Documents/6dof_gym_vault/README.md","used_for":"architecture, safety, task-spec and deployment direction"},
-    {"id":"arm-atlas","title":"Arm Atlas — 6-DOF Learning Lab","publisher":"Local study dashboard","url":"file:///~/Documents/arms_gym/README.md","used_for":"task-family library, capability curricula, safety boundaries and the model map folded into this repository"}
+    {"id":"lerobot-dataset","title":"LeRobotDataset v3 documentation","publisher":"Hugging Face","url":"https://huggingface.co/docs/lerobot/lerobot-dataset-v3","used_for":"recording format and dataset interoperability"}
   ],
   "study_path": [
     {"stage":"HANDS-ON","title":"Hugging Face LeRobot","blurb":"Robot datasets, policies including ACT, Diffusion Policy and VLAs, plus practical hardware guides.","url":"https://huggingface.co/docs/lerobot/index"},

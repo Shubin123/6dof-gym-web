@@ -19,6 +19,8 @@
       "max_reach_px": 525,
       "min_reach_px": 180,
       "min_reach_rise": 0.6,
+      "floor_z_px": 0,
+      "arm_clearance_px": 28,
       "goal_height_px": [
         0,
         160
