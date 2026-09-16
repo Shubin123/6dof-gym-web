@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="A browser-first 6-DOF robot-arm learning gym." />
+    <meta name="description" content="A browser-first 6-DOF robot-arm learning gym: eleven fully specified task examples, a 2-D and 3-D viewport, and bounded episode recording." />
     <title>ArmLab — 6-DOF Gym</title>
   </head>
   <body>
@@ -11,40 +11,50 @@
       <header class="topbar">
         <a class="brand" href="#top">ARM<span>LAB</span></a>
         <nav aria-label="Primary navigation">
-          <a href="#demo">Live lab</a><a href="#workflows">Workflows</a><a href="#models">Models</a><a href="#data">Data</a>
+          <a href="#demo">Live lab</a><a href="#workflows">Examples</a><a href="#models">Models</a><a href="#data">Data</a><a href="#study">Study path</a>
         </nav>
         <span class="status"><i></i> Browser runtime</span>
       </header>
 
       <section class="hero" id="top">
-        <p class="eyebrow">ONE TASK SPEC · THREE RUNTIMES</p>
+        <p class="eyebrow">ONE TASK SPEC · TWO VIEWPORTS · THREE RUNTIMES</p>
         <h1>Teach an arm<br /><em>before it moves.</em></h1>
         <p class="lede">An interactive 6‑DOF arm gym for safe task design, demonstrations, and vision-language-action policy planning.</p>
-        <div class="hero-actions"><a class="button primary" href="#demo">Open the live lab <span>↓</span></a><a class="button ghost" href="#workflows">See task examples</a></div>
-        <dl class="stats"><div><dt>6 + 1</dt><dd>arm joints + gripper</dd></div><div><dt>25 Hz</dt><dd>control cadence</dd></div><div><dt>22</dt><dd>state features</dd></div></dl>
+        <div class="hero-actions"><a class="button primary" href="#demo">Open the live lab <span>↓</span></a><a class="button ghost" href="#workflows">See the 11 task examples</a></div>
+        <dl class="stats"><div><dt>6 + 1</dt><dd>arm joints + gripper</dd></div><div><dt>11</dt><dd>specified task examples</dd></div><div><dt>25 Hz</dt><dd>control cadence</dd></div><div><dt>22</dt><dd>state features</dd></div></dl>
       </section>
 
       <section class="lab-section" id="demo">
         <div class="section-heading"><div><p class="eyebrow">INTERACTIVE DEMO</p><h2>Move the goal. Watch the policy work.</h2></div><p>Simulated browser runtime · no hardware connected</p></div>
         <div class="lab-grid">
           <section class="stage-panel" aria-label="Robot arm simulation">
-            <div class="scene-label"><span>ARM6‑REACH‑V0</span><span id="sim-time">T + 00.0 s</span></div>
-            <svg id="scene" viewBox="0 0 760 490" role="img" aria-label="Interactive top-down robot arm simulation">
-              <defs><linearGradient id="floor" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#1a2130"/><stop offset="1" stop-color="#0e131d"/></linearGradient><filter id="glow"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
-              <rect width="760" height="490" fill="url(#floor)"/><path d="M0 370H760M0 250H760M0 130H760M120 0V490M280 0V490M440 0V490M600 0V490" class="grid"/>
-              <rect x="80" y="90" width="560" height="310" rx="20" class="workspace"/>
-              <circle id="goal-ring" cx="555" cy="185" r="23" class="goal-ring"/><path id="goal-cross" d="M535 185h40M555 165v40" class="goal-cross"/>
-              <g id="object" transform="translate(555 185)"><rect x="-12" y="-12" width="24" height="24" rx="4" class="cube"/></g>
-              <g id="arm"><path id="arm-shadow" class="arm-shadow"/><path id="arm-link" class="arm-link"/><g id="joints"></g><g id="gripper"></g></g>
-              <g transform="translate(52 453)"><circle r="5" class="legend-dot"/><text x="13" y="5">reachable workspace</text></g>
-            </svg>
+            <div class="scene-label">
+              <span>ARM6‑REACH‑V0</span>
+              <div class="viewport-toggle" role="group" aria-label="Viewport mode">
+                <button id="view-2d" class="view-button active" aria-pressed="true">2D</button><button id="view-3d" class="view-button" aria-pressed="false">3D</button>
+              </div>
+              <span id="sim-time">T + 00.0 s</span>
+            </div>
+            <div class="stage-viewports">
+              <svg id="scene" viewBox="0 0 760 490" role="img" aria-label="Interactive top-down robot arm simulation">
+                <defs><linearGradient id="floor" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#1a2130"/><stop offset="1" stop-color="#0e131d"/></linearGradient><filter id="glow"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+                <rect width="760" height="490" fill="url(#floor)"/><path d="M0 370H760M0 250H760M0 130H760M120 0V490M280 0V490M440 0V490M600 0V490" class="grid"/>
+                <rect x="80" y="90" width="560" height="310" rx="20" class="workspace"/>
+                <circle id="goal-ring" cx="555" cy="185" r="23" class="goal-ring"/><path id="goal-cross" d="M535 185h40M555 165v40" class="goal-cross"/>
+                <g id="object" transform="translate(555 185)"><rect x="-12" y="-12" width="24" height="24" rx="4" class="cube"/></g>
+                <g id="arm"><path id="arm-shadow" class="arm-shadow"/><path id="arm-link" class="arm-link"/><g id="joints"></g><g id="gripper"></g></g>
+                <g transform="translate(52 453)"><circle r="5" class="legend-dot"/><text x="13" y="5">reachable workspace</text></g>
+              </svg>
+              <div id="stage-3d" class="stage-3d" hidden aria-label="Three-dimensional robot arm viewport"></div>
+            </div>
+            <p id="viewport-hint" class="viewport-hint">Click anywhere in the scene to move the goal.</p>
             <div class="scene-controls"><button id="reset" class="icon-button">↺ Reset</button><button id="run-policy" class="button compact primary">Run demo policy</button><button id="record" class="icon-button">● Record</button></div>
           </section>
           <aside class="control-panel">
             <div class="panel-tabs" role="tablist"><button class="tab active" data-tab="control">Control</button><button class="tab" data-tab="telemetry">Telemetry</button><button class="tab" data-tab="episode">Episode</button></div>
             <div class="tab-content active" id="control">
               <label class="select-label">Task scenario<select id="scenario"></select></label>
-              <p class="help">Drag the amber target in the scene, or adjust the joint targets below.</p>
+              <p class="help" id="scenario-instruction">Drag the amber target in the scene, or adjust the joint targets below.</p>
               <div id="sliders" class="sliders"></div>
               <div class="safety"><span>Safety envelope</span><b id="safety-state">Within limits</b></div>
             </div>
@@ -68,18 +78,28 @@
       </section>
 
       <section id="workflows" class="section workflows">
-        <div class="section-heading"><div><p class="eyebrow">TASK EXAMPLES</p><h2>How real arms earn their keep.</h2></div><p>Each example is runnable in the lab above.</p></div>
-        <div id="workflow-cards" class="card-grid"></div>
+        <div class="section-heading"><div><p class="eyebrow">TASK EXAMPLES</p><h2>Eleven skills, fully specified.</h2></div><p>Every example carries a success signal, a sensor set, a curriculum, its known failure modes, and a safety boundary — and every one loads into the lab above.</p></div>
+        <div id="family-filters" class="family-filters" role="group" aria-label="Filter examples by family"></div>
+        <div class="task-layout">
+          <div id="task-list" class="task-list" role="tablist" aria-label="Task examples"></div>
+          <article id="task-detail" class="task-detail"></article>
+        </div>
       </section>
 
       <section id="models" class="section models">
         <div class="split-heading"><div><p class="eyebrow">POLICY LADDER</p><h2>Use the smallest model that makes the task reliable.</h2></div><p>Foundation policies need task-specific demonstrations and safety checks; a policy never bypasses the control envelope.</p></div>
+        <div id="model-filters" class="model-filters" role="group" aria-label="Filter models by route"></div>
         <div id="model-cards" class="model-grid"></div>
       </section>
 
       <section id="data" class="section data-section">
         <div class="split-heading"><div><p class="eyebrow">COMPILED DATA</p><h2>Traceable task and training inputs.</h2></div><p>Machine-readable metadata is checked into this repository so the demo, task cards, and docs share one source.</p></div>
         <div class="data-layout"><div id="dataset-table" class="dataset-table"></div><aside class="source-box"><h3>Data discipline</h3><p>Use demonstrations to represent the actual cameras, gripper, workcell, objects, and recovery actions. Evaluate held-out placements and perturbations—not just replay.</p><a href="./data/compiled.json" target="_blank" rel="noopener">Open compiled.json ↗</a><a href="./data/sources.json" target="_blank" rel="noopener">Open source registry ↗</a></aside></div>
+      </section>
+
+      <section id="study" class="section study-section">
+        <div class="split-heading"><div><p class="eyebrow">VISUAL LEARNING · BUILDING BLOCKS</p><h2>Watch, simulate, then touch hardware.</h2></div><p>The study path folded in from the Arm Atlas learning lab. Work down it in order; each stage answers a question the next one assumes.</p></div>
+        <div id="study-list" class="study-list"></div>
       </section>
 
       <section class="next section"><p class="eyebrow">FROM SIM TO BENCH</p><h2>Same task contract. Different trust boundary.</h2><div class="runtime-flow"><span>Browser lab</span><b>→</b><span>Python / LeRobot training</span><b>→</b><span>Safety-gated hardware</span></div></section>
