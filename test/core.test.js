@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import compiled from '../data/compiled.json' with { type: 'json' };
 import registry from '../data/sources.json' with { type: 'json' };
-import { ARM, ARM_B, buildEpisodeArtifact, distance, forwardKinematics, GOAL_Z, guidedStep, HALT, haltState, MAX_EPISODE_TRANSITIONS, nearestArm, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
+import { ARM, ARM_B, buildEpisodeArtifact, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, guidedStep, HALT, haltState, HOME_POSE, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
 
-const HOME = [1.284, 1.61, -1.688, -0.865, -1.522, -1.004];
+const HOME = HOME_POSE;
 const armsOf = (workflow) => (workflow.arms === 2 ? [[ARM, workflow.goal], [ARM_B, workflow.goal_b]] : [[ARM, workflow.goal]]);
 const targetOf = (workflow, arm, goal) => projectToReachableWorkspace([...goal, workflow.goal_height], compiled.environment.safety, arm);
 
@@ -65,6 +65,52 @@ test('the two arms are mirror images that share one joint vector', () => {
   });
   assert.equal(nearestArm([540, 200], [ARM, ARM_B]).id, 'B');
   assert.equal(nearestArm([220, 200], [ARM, ARM_B]).id, 'A');
+});
+
+test('floor, workspace, and inter-arm collisions are rejected', () => {
+  const safety = compiled.environment.safety;
+  assert.equal(evaluateCellSafety([{ q: HOME, arm: ARM }, { q: HOME, arm: ARM_B }], safety).safe, true, 'home is a safe bimanual pose');
+
+  const belowFloor = evaluateCellSafety([{ q: [0, 0.6, -1.1, 0, -0.6, 0], arm: ARM }], safety);
+  assert.equal(belowFloor.safe, false);
+  assert.equal(belowFloor.reason, 'floor');
+
+  const beyondEdge = evaluateCellSafety([{ q: [0, 0, 0, 0, 0, 0], arm: ARM }], safety);
+  assert.equal(beyondEdge.safe, false);
+  assert.equal(beyondEdge.reason, 'workspace');
+
+  const formerCrossedHome = [1.284, 1.61, -1.688, -0.865, -1.522, -1.004];
+  const crossed = evaluateCellSafety([{ q: formerCrossedHome, arm: ARM }, { q: formerCrossedHome, arm: ARM_B }], safety);
+  assert.equal(crossed.safe, false);
+  assert.equal(crossed.reason, 'collision');
+  assert.ok(crossed.armClearance < safety.arm_clearance_px);
+});
+
+test('every policy path stays over the floor, inside its edges, and clear of the other arm', () => {
+  const safety = compiled.environment.safety;
+  for (const workflow of compiled.workflows) {
+    const definitions = armsOf(workflow);
+    const plans = [];
+    definitions.forEach(([arm, goal], index) => {
+      const otherPoses = plans.map((plan, otherIndex) => ({ q: plan.q, arm: definitions[otherIndex][0] }));
+      plans[index] = solveInverseKinematics(targetOf(workflow, arm, goal), arm, safety, otherPoses);
+    });
+    const poses = definitions.map(([arm]) => ({ q: [...HOME], arm }));
+    const motion = planSafeCellMotion(poses, plans.map((plan) => plan.q), safety);
+    assert.ok(motion, `${workflow.id} should have a safe policy path`);
+    assert.ok(motion.frames.length <= workflow.horizon_steps, `${workflow.id} needs ${motion.frames.length}/${workflow.horizon_steps} steps`);
+    let previous = poses.map(({ q }) => q);
+    for (const frame of motion.frames) {
+      const assessment = evaluateCellSafety(frame.map((q, index) => ({ q, arm: definitions[index][0] })), safety);
+      assert.equal(assessment.safe, true, `${workflow.id} crossed its ${assessment.reason} boundary`);
+      frame.forEach((q, armIndex) => q.forEach((value, joint) => {
+        assert.ok(Math.abs(value - previous[armIndex][joint]) <= definitions[armIndex][0].maxActionDelta + 1e-9, `${workflow.id} exceeded the joint-delta cap`);
+      }));
+      previous = frame;
+    }
+    const finalErrors = definitions.map(([arm, goal], index) => distance(forwardKinematics(previous[index], arm).points.at(-1), targetOf(workflow, arm, goal)));
+    assert.ok(finalErrors.every((error) => error < 2), `${workflow.id} did not finish at its goals: ${finalErrors}`);
+  }
 });
 
 test('a pose occupies real height, not a single plane', () => {
@@ -169,5 +215,6 @@ test('the study path and source registry keep resolvable references', () => {
     assert.match(entry.url, /^https:\/\//);
     assert.ok(entry.stage && entry.title && entry.blurb);
   }
+  assert.ok(registry.sources.every((source) => /^https:\/\//.test(source.url)));
   assert.ok(registry.sources.every((source) => typeof source.used_for === 'string' && source.used_for.length > 0));
 });
