@@ -342,9 +342,26 @@ function syncSliders() {
   if (goalZ) { goalZ.value = armState.goal[2]; goalZ.nextElementSibling.value = `${fmt(armState.goal[2] / 10, 1)} cm`; }
 }
 
-function setArmGoal(armState, point) {
+function setArmGoal(armState, point, { replan = true } = {}) {
   armState.goal = projectToReachableWorkspace(point, compiled.environment.safety, armState.arm);
-  armState.plan = solveInverseKinematics(armState.goal, armState.arm);
+  if (replan) armState.plan = solveInverseKinematics(armState.goal, armState.arm);
+}
+
+/**
+ * Height changes coming from a drag in the 3-D viewport.
+ *
+ * A full IK search on every pointer move would stall the drag, so the goal
+ * follows the pointer unplanned and the solver runs once on release.
+ */
+function setGoalHeight(armId, height, { committed = true } = {}) {
+  const armState = state.arms.find((candidate) => candidate.arm.id === armId);
+  if (!armState) return;
+  if (height !== null) setArmGoal(armState, [armState.goal[0], armState.goal[1], height], { replan: false });
+  if (committed) armState.plan = solveInverseKinematics(armState.goal, armState.arm);
+  state.activeArm = state.arms.indexOf(armState);
+  [...$('#arm-switch').children].forEach((chip, index) => chip.classList.toggle('active', index === state.activeArm));
+  updateArms();
+  syncSliders();
 }
 
 /** Route a scene click to the arm whose base column is nearest, keeping its goal height. */
@@ -400,6 +417,7 @@ async function mountViewport3D() {
     const instance = createViewport3D($('#stage-3d'), {
       workspace: compiled.environment.safety,
       onGoalPick: (point) => setGoalFromScene(point),
+      onGoalHeight: setGoalHeight,
     });
     viewport.instance = instance;
     pushViewportState();
@@ -437,7 +455,7 @@ async function setViewportMode(mode) {
     setHidden($('#stage-3d'), false);
     instance.start();
     pushViewportState();
-    $('#viewport-hint').textContent = 'Drag to orbit · scroll to zoom · click the floor to move the goal.';
+    $('#viewport-hint').textContent = 'Drag to orbit · scroll to zoom · click the floor to move a goal · drag a cube up or down to change its height.';
   } catch (error) {
     viewport.failed = true;
     $('#view-2d').classList.add('active');
