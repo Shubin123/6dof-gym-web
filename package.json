@@ -1,8 +1,20 @@
 {
   "name": "6dof-gym-web",
   "version": "0.2.0",
+  "description": "Interactive browser gym for designing and validating 6-DOF robot-arm tasks.",
   "private": true,
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Shubin123/6dof-gym-web.git"
+  },
+  "homepage": "https://shubin123.github.io/6dof-gym-web/",
+  "bugs": {
+    "url": "https://github.com/Shubin123/6dof-gym-web/issues"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -10,7 +22,7 @@
     "test": "node --test"
   },
   "devDependencies": {
-    "vite": "latest"
+    "vite": "^8.3.0"
   },
   "dependencies": {
     "three": "^0.186.0"

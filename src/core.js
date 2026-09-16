@@ -28,6 +28,9 @@ export const ARM = Object.freeze({
  */
 export const ARM_B = Object.freeze({ ...ARM, id: 'B', base: [560, 345], mirror: true });
 
+/** A folded, in-bounds rest pose that keeps mirrored arms on their own sides. */
+export const HOME_POSE = Object.freeze([0.662, 1.276, 1.496, -1.465, 1.488, -1.217]);
+
 /** Height band a goal may occupy, in scene pixels above the table. */
 export const GOAL_Z = Object.freeze({ min: 0, max: 160, rest: 60 });
 
@@ -41,6 +44,7 @@ export const HALT = Object.freeze({
   REACHED: 'reached',
   BUDGET: 'budget',
   OPERATOR: 'operator',
+  SAFETY: 'safety',
 });
 
 export const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
@@ -55,6 +59,23 @@ const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const norm = (a) => Math.hypot(a[0], a[1], a[2]);
 const unit = (a) => { const length = norm(a) || 1; return [a[0] / length, a[1] / length, a[2] / length]; };
+
+/** Shortest distance between two finite line segments in three dimensions. */
+function segmentDistance(a0, a1, b0, b1) {
+  const u = sub(a1, a0);
+  const v = sub(b1, b0);
+  const w = sub(a0, b0);
+  const uu = dot(u, u);
+  const uv = dot(u, v);
+  const vv = dot(v, v);
+  const uw = dot(u, w);
+  const vw = dot(v, w);
+  const denominator = uu * vv - uv * uv;
+  let alongA = denominator < 1e-9 ? 0 : clamp((uv * vw - vv * uw) / denominator, 0, 1);
+  let alongB = vv < 1e-9 ? 0 : clamp((uv * alongA + vw) / vv, 0, 1);
+  alongA = uu < 1e-9 ? 0 : clamp((uv * alongB - uw) / uu, 0, 1);
+  return distance(add(a0, u, alongA), add(b0, v, alongB));
+}
 
 /** Rodrigues rotation of `v` about the unit axis `k` by `angle`. */
 function rotate(v, k, angle) {
@@ -106,6 +127,54 @@ export function forwardKinematics(q, arm = ARM) {
 }
 
 /**
+ * Validate complete arm geometry, not merely its goal marker.
+ *
+ * Link centre lines must remain over the marked floor and at/above its plane.
+ * In a bimanual cell, every link pair must also retain the configured physical
+ * clearance. The renderers and controllers consume this single result.
+ */
+export function evaluateCellSafety(poses, safety = {}) {
+  const bounds = safety.goal_workspace || [-Infinity, Infinity, -Infinity, Infinity];
+  const [minX, maxX, minY, maxY] = bounds;
+  const floorZ = safety.floor_z_px ?? 0;
+  const requiredArmClearance = safety.arm_clearance_px ?? 0;
+  const chains = poses.map(({ q, arm = ARM }) => ({ arm, points: forwardKinematics(q, arm).points }));
+  let floorClearance = Infinity;
+  let boundaryClearance = Infinity;
+  for (const { points } of chains) {
+    for (const [x, y, z] of points) {
+      floorClearance = Math.min(floorClearance, z - floorZ);
+      boundaryClearance = Math.min(boundaryClearance, x - minX, maxX - x, y - minY, maxY - y);
+    }
+  }
+
+  let armClearance = Infinity;
+  for (let first = 0; first < chains.length; first += 1) {
+    for (let second = first + 1; second < chains.length; second += 1) {
+      const a = chains[first].points;
+      const b = chains[second].points;
+      for (let ai = 0; ai < a.length - 1; ai += 1) {
+        for (let bi = 0; bi < b.length - 1; bi += 1) {
+          armClearance = Math.min(armClearance, segmentDistance(a[ai], a[ai + 1], b[bi], b[bi + 1]));
+        }
+      }
+    }
+  }
+
+  let reason = null;
+  if (floorClearance < -1e-6) reason = 'floor';
+  else if (boundaryClearance < -1e-6) reason = 'workspace';
+  else if (armClearance < requiredArmClearance - 1e-6) reason = 'collision';
+  return {
+    safe: reason === null,
+    reason,
+    floorClearance,
+    boundaryClearance,
+    armClearance,
+  };
+}
+
+/**
  * Solve the arm for a point in space with deterministic multi-start CCD.
  *
  * Each joint turns about its own world-space axis by the angle that best
@@ -113,10 +182,11 @@ export function forwardKinematics(q, arm = ARM) {
  * fixed set of seed postures keeps the result reproducible after an operator
  * has moved the sliders, and a mirrored arm is solved in its reflected frame.
  */
-export function solveInverseKinematics(target, arm = ARM) {
+export function solveInverseKinematics(target, arm = ARM, safety = {}, otherPoses = []) {
   const solverArm = arm.mirror ? { ...arm, mirror: false } : arm;
   const goal = mirrorPoint(target, arm);
   const seeds = [
+    [...HOME_POSE],
     [0, 0.6, -1.1, 0, -0.6, 0],
     [-0.8, 0.7, -1.2, 0.3, -0.7, 0],
     [0.8, 0.7, -1.2, -0.3, -0.7, 0],
@@ -124,9 +194,25 @@ export function solveInverseKinematics(target, arm = ARM) {
     [1.6, 0.9, -1.4, 0, -0.5, 0],
     [-0.4, 1.2, -1.6, 0.5, -1, 0.3],
     [0.4, 0.3, -0.8, -0.5, -0.4, -0.3],
+    [0.6, 1.3, 1.5, -1.45, 1.45, -1.2],
+    [-0.6, 1.3, 1.5, 1.45, 1.45, 1.2],
+    [1.2, 1.1, 1.4, -1.3, 1.35, -0.8],
+    [-1.2, 1.1, 1.4, 1.3, 1.35, 0.8],
+    [0.9, 1.5, 1.2, -1.5, 1.5, -0.5],
+    [-0.9, 1.5, 1.2, 1.5, 1.5, 0.5],
   ];
+  // Low-discrepancy restarts cover alternate elbow-up / elbow-down solutions.
+  // They are deterministic, so a task produces the same plan on every run.
+  const phases = [0.61803398875, 0.41421356237, 0.73205080757, 0.2360679775, 0.64575131106, 0.31662479036];
+  for (let restart = 1; restart <= 24; restart += 1) {
+    seeds.push(phases.map((phase, index) => {
+      const limit = limitOf(solverArm, index);
+      return (((restart * phase) % 1) * 2 - 1) * limit;
+    }));
+  }
 
   let best = null;
+  let bestSafe = null;
   for (const seed of seeds) {
     const q = seed.map((value, index) => clamp(value, -limitOf(solverArm, index), limitOf(solverArm, index)));
     for (let iteration = 0; iteration < 120; iteration += 1) {
@@ -145,9 +231,15 @@ export function solveInverseKinematics(target, arm = ARM) {
       if (distance(forwardKinematics(q, solverArm).points.at(-1), goal) < 0.5) break;
     }
     const candidate = { q, distance: distance(forwardKinematics(q, solverArm).points.at(-1), goal) };
+    candidate.safety = evaluateCellSafety([...otherPoses, { q, arm }], safety);
     if (!best || candidate.distance < best.distance) best = candidate;
+    if (candidate.safety.safe && (!bestSafe || candidate.distance < bestSafe.distance)) bestSafe = candidate;
   }
-  return best;
+  const selected = bestSafe || best;
+  // Reflecting a chain preserves all configured clearances, but callers expect
+  // the safety result to describe the real arm rather than the solver frame.
+  selected.safety = evaluateCellSafety([...otherPoses, { q: selected.q, arm }], safety);
+  return selected;
 }
 
 /** One safety-capped tracking update toward an already validated IK plan. */
@@ -161,6 +253,104 @@ export function guidedStep(q, target, arm = ARM, plan = solveInverseKinematics(t
   ));
   const action = next.map((value, index) => value - q[index]);
   return { q: next, action, distance: distance(forwardKinematics(next, arm).points.at(-1), target) };
+}
+
+const jointDistance = (a, b) => Math.hypot(...a.map((value, index) => value - b[index]));
+const maxJointDistance = (a, b) => Math.max(...a.map((value, index) => Math.abs(value - b[index])));
+const interpolateJoints = (a, b, amount) => a.map((value, index) => value + (b[index] - value) * amount);
+
+function safeEdge(from, to, isSafe, maxDelta) {
+  const steps = Math.max(1, Math.ceil(maxJointDistance(from, to) / maxDelta));
+  const samples = [];
+  for (let step = 1; step <= steps; step += 1) {
+    const q = interpolateJoints(from, to, step / steps);
+    if (!isSafe(q)) return null;
+    samples.push(q);
+  }
+  return samples;
+}
+
+/** Find a deterministic, safety-checked joint path for one arm. */
+export function planSafeMotion(start, target, arm = ARM, safety = {}, otherPoses = [], salt = 0) {
+  const isSafe = (q) => evaluateCellSafety([...otherPoses, { q, arm }], safety).safe;
+  if (!isSafe(start) || !isSafe(target)) return null;
+  const direct = safeEdge(start, target, isSafe, arm.maxActionDelta * 0.96);
+  if (direct) return direct;
+
+  // A compact deterministic RRT supplies a route around floor, table-edge,
+  // and other-arm constraints when straight joint interpolation is unsafe.
+  let randomState = (123456789 + salt * 2654435761) >>> 0;
+  const random = () => {
+    randomState = (1664525 * randomState + 1013904223) >>> 0;
+    return randomState / 4294967296;
+  };
+  const nodes = [{ q: [...start], parent: -1 }];
+  for (let iteration = 0; iteration < 15000; iteration += 1) {
+    const sample = iteration % 7 === 0
+      ? target
+      : arm.lengths.map((_, index) => (random() * 2 - 1) * limitOf(arm, index));
+    let nearest = 0;
+    let nearestDistance = Infinity;
+    for (let index = 0; index < nodes.length; index += 1) {
+      const candidateDistance = jointDistance(nodes[index].q, sample);
+      if (candidateDistance < nearestDistance) {
+        nearest = index;
+        nearestDistance = candidateDistance;
+      }
+    }
+    const amount = Math.min(1, 0.35 / (nearestDistance || 1));
+    const next = interpolateJoints(nodes[nearest].q, sample, amount);
+    if (!safeEdge(nodes[nearest].q, next, isSafe, arm.maxActionDelta * 0.96)) continue;
+    nodes.push({ q: next, parent: nearest });
+    const finish = safeEdge(next, target, isSafe, arm.maxActionDelta * 0.96);
+    if (!finish) continue;
+
+    const waypoints = [];
+    for (let index = nodes.length - 1; index > 0; index = nodes[index].parent) waypoints.push(nodes[index].q);
+    waypoints.reverse();
+    waypoints.push(target);
+    const route = [start, ...waypoints];
+    const smoothed = [start];
+    for (let from = 0; from < route.length - 1;) {
+      let to = route.length - 1;
+      while (to > from + 1 && !safeEdge(route[from], route[to], isSafe, arm.maxActionDelta * 0.96)) to -= 1;
+      smoothed.push(route[to]);
+      from = to;
+    }
+    const path = [];
+    let previous = start;
+    for (const waypoint of smoothed.slice(1)) {
+      path.push(...safeEdge(previous, waypoint, isSafe, arm.maxActionDelta * 0.96));
+      previous = waypoint;
+    }
+    return path;
+  }
+  return null;
+}
+
+/**
+ * Plan a whole cell by moving one arm at a time and trying both bimanual
+ * orders. Every returned frame has already passed the shared safety check.
+ */
+export function planSafeCellMotion(poses, targets, safety = {}) {
+  const orders = poses.length === 2 ? [[0, 1], [1, 0]] : [poses.map((_, index) => index)];
+  let best = null;
+  for (const order of orders) {
+    const working = poses.map(({ q, arm }) => ({ q: [...q], arm }));
+    const frames = [];
+    let failed = false;
+    for (const moving of order) {
+      const otherPoses = working.filter((_, index) => index !== moving);
+      const path = planSafeMotion(working[moving].q, targets[moving], working[moving].arm, safety, otherPoses, moving + order[0] * 9);
+      if (!path) { failed = true; break; }
+      for (const q of path) {
+        working[moving].q = [...q];
+        frames.push(working.map((pose) => [...pose.q]));
+      }
+    }
+    if (!failed && (!best || frames.length < best.frames.length)) best = { frames, order };
+  }
+  return best;
 }
 
 /**

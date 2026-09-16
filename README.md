@@ -1,6 +1,6 @@
 # ArmLab — 6‑DOF Gym
 
-A static, interactive web prototype derived from the local **6-DOF gym on the web** design vault. It demonstrates a 6-DOF arm task contract, a library of fully specified task examples, browser episode recording, curated source data, and an explicit policy-selection ladder.
+A static, interactive web prototype for designing and validating 6-DOF arm tasks. It demonstrates a task contract, a library of fully specified examples, browser episode recording, curated source data, and an explicit policy-selection ladder.
 
 ## Run locally
 
@@ -40,7 +40,11 @@ Eleven examples ship in `data/compiled.json`, grouped into six families: basics,
 
 Every example is reachable in the browser lab: `npm test` asserts that each goal lies inside the declared workspace and reach shell, is reached in three dimensions by both the solver and the tracking controller, and keeps a complete specification.
 
-The task families, curricula, safety boundaries, model map, and study path were folded in from the local **Arm Atlas — 6-DOF Learning Lab** study dashboard, which now lives on as a side piece to this repository.
+## Safety envelope
+
+The browser controller validates the entire arm geometry, not only its goal marker. Manual moves, imported replays, and demo-policy frames are rejected before a link can pass below the table, cross the marked floor edge, or enter the other arm's configured clearance. Bimanual policy runs use deterministic collision-checked paths and halt in an explicit safety state if no valid route exists.
+
+This remains a geometric browser simulation, not a certified collision system or hardware controller. Physical deployments still require robot-specific meshes, self-collision checks, torque and velocity limits, a watchdog, dead-man control, and an independent e-stop.
 
 ## The arm
 
@@ -69,7 +73,7 @@ three.js is loaded on demand. It sits in its own lazy chunk, so the initial page
 
 The demo planner is a transparent geometric controller, and a run is bounded rather than open-ended:
 
-- **Halt state.** Every run ends in a named state — *goal reached* with the step count, *step budget exhausted*, or *halted by operator* — so a success is never confused with a run that simply gave up. The run button becomes a halt button while a policy is moving.
+- **Halt state.** Every run ends in a named state — *goal reached* with the step count, *step budget exhausted*, *safety boundary*, or *halted by operator* — so a success is never confused with a run that simply gave up. The run button becomes a halt button while a policy is moving.
 - **Speed.** A slider advances the run between 0.25× and 8× control steps per frame: slow enough to watch a correction, fast enough to skip a long reach.
 - **Loop.** With loop on, a successful run returns the arms to the home pose and repeats, which is how you watch a task for repeatability rather than for one lucky episode.
 
@@ -90,4 +94,4 @@ Voice capture is capped at 60 seconds / 5 MB and episode import at 8 MB, prevent
 
 ## Deployment
 
-The Pages workflow builds and deploys `main`. Repository Pages must be configured to use **GitHub Actions** as the source. With a private repository, site availability depends on the owner’s GitHub plan and Pages visibility configuration.
+The Pages workflow tests, builds, and deploys `main`. Repository Pages is configured to use **GitHub Actions** as the source.

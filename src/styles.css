@@ -41,7 +41,7 @@
 .scene-label b{color:var(--lime);font-weight:500}
 .policy-bar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:12px 2px 0;border-top:1px solid #1e2836;margin-top:11px}
 .halt-state{font:10px var(--mono);letter-spacing:.4px;padding:5px 10px;border:1px solid #334054;color:#9ba6b7}
-.halt-state.running{border-color:#c9fb5d;color:#c9fb5d}.halt-state.reached{border-color:#79c845;color:#a9e87a}.halt-state.budget{border-color:#c08a3a;color:#ffbd4a}.halt-state.operator{border-color:#8d5a4a;color:#e0a08c}
+.halt-state.running{border-color:#c9fb5d;color:#c9fb5d}.halt-state.reached{border-color:#79c845;color:#a9e87a}.halt-state.budget{border-color:#c08a3a;color:#ffbd4a}.halt-state.operator,.halt-state.safety{border-color:#8d5a4a;color:#e0a08c}
 .policy-speed{display:flex;align-items:center;gap:9px;font:10px var(--mono);color:#9ba6b7;margin-left:auto}
 .policy-speed input{width:120px;accent-color:#c9fb5d}.policy-speed output{min-width:44px;text-align:right;color:#dfe6ee}
 .policy-loop{display:flex;align-items:center;gap:6px;font:10px var(--mono);color:#9ba6b7;cursor:pointer}.policy-loop input{accent-color:#c9fb5d}
