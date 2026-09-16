@@ -29,7 +29,7 @@
         <div class="lab-grid">
           <section class="stage-panel" aria-label="Robot arm simulation">
             <div class="scene-label">
-              <span>ARM6‑REACH‑V0</span>
+              <span>ARM6‑REACH‑V0 · <b id="arm-count">Single arm</b></span>
               <div class="viewport-toggle" role="group" aria-label="Viewport mode">
                 <button id="view-2d" class="view-button active" aria-pressed="true">2D</button><button id="view-3d" class="view-button" aria-pressed="false">3D</button>
               </div>
@@ -40,14 +40,18 @@
                 <defs><linearGradient id="floor" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#1a2130"/><stop offset="1" stop-color="#0e131d"/></linearGradient><filter id="glow"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
                 <rect width="760" height="490" fill="url(#floor)"/><path d="M0 370H760M0 250H760M0 130H760M120 0V490M280 0V490M440 0V490M600 0V490" class="grid"/>
                 <rect x="80" y="90" width="560" height="310" rx="20" class="workspace"/>
-                <circle id="goal-ring" cx="555" cy="185" r="23" class="goal-ring"/><path id="goal-cross" d="M535 185h40M555 165v40" class="goal-cross"/>
-                <g id="object" transform="translate(555 185)"><rect x="-12" y="-12" width="24" height="24" rx="4" class="cube"/></g>
-                <g id="arm"><path id="arm-shadow" class="arm-shadow"/><path id="arm-link" class="arm-link"/><g id="joints"></g><g id="gripper"></g></g>
+                <g id="goals"></g>
+                <g id="arms"></g>
                 <g transform="translate(52 453)"><circle r="5" class="legend-dot"/><text x="13" y="5">reachable workspace</text></g>
               </svg>
               <div id="stage-3d" class="stage-3d" hidden aria-label="Three-dimensional robot arm viewport"></div>
             </div>
-            <p id="viewport-hint" class="viewport-hint">Click anywhere in the scene to move the goal.</p>
+            <p id="viewport-hint" class="viewport-hint">Click anywhere in the scene to move the nearest arm's goal.</p>
+            <div class="policy-bar">
+              <span id="halt-state" class="halt-state idle">Idle · policy not running</span>
+              <label class="policy-speed">Speed<input id="policy-speed" type="range" min="0.25" max="8" step="0.25" value="1" aria-label="Policy playback speed" /><output id="policy-speed-value">1.00×</output></label>
+              <label class="policy-loop"><input id="policy-loop" type="checkbox" /> Loop</label>
+            </div>
             <div class="scene-controls"><button id="reset" class="icon-button">↺ Reset</button><button id="run-policy" class="button compact primary">Run demo policy</button><button id="record" class="icon-button">● Record</button></div>
           </section>
           <aside class="control-panel">
@@ -55,11 +59,12 @@
             <div class="tab-content active" id="control">
               <label class="select-label">Task scenario<select id="scenario"></select></label>
               <p class="help" id="scenario-instruction">Drag the amber target in the scene, or adjust the joint targets below.</p>
+              <div id="arm-switch" class="arm-switch" role="group" aria-label="Arm under manual control" hidden></div>
               <div id="sliders" class="sliders"></div>
               <div class="safety"><span>Safety envelope</span><b id="safety-state">Within limits</b></div>
             </div>
             <div class="tab-content" id="telemetry">
-              <div class="metric"><span>Distance to goal</span><strong id="distance">—</strong></div><div class="metric"><span>Reward</span><strong id="reward">—</strong></div><div class="metric"><span>Episode step</span><strong id="step">0 / 200</strong></div>
+              <div class="metric"><span>Distance to goal</span><strong id="distance">—</strong></div><div class="metric"><span>Tool height</span><strong id="tool-height">—</strong></div><div class="metric"><span>Reward</span><strong id="reward">—</strong></div><div class="metric"><span>Episode step</span><strong id="step">0 / 200</strong></div>
               <div class="bar-label"><span>Reach reward</span><span id="reward-bar-value">0%</span></div><div class="bar"><i id="reward-bar"></i></div>
               <p class="help telemetry-note">The demo planner is a transparent IK-like controller, not a learned policy. Use it to validate task geometry and recordings.</p>
             </div>

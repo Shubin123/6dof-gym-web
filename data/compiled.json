@@ -1,151 +1,608 @@
 {
-  "schema_version": "0.2.0",
+  "schema_version": "0.3.0",
   "generated_at": "2026-09-16",
-  "environment": {"id":"Arm6-Reach-v0","control_hz":25,"physics_hz":500,"observation_dim":22,"action_dim":7,"max_steps":200,"safety":{"joint_delta_rad":0.05,"goal_workspace":[80,640,90,400],"max_reach_px":525}},
+  "environment": {
+    "id": "Arm6-Reach-v0",
+    "control_hz": 25,
+    "physics_hz": 500,
+    "observation_dim": 22,
+    "action_dim": 7,
+    "max_steps": 200,
+    "safety": {
+      "joint_delta_rad": 0.05,
+      "goal_workspace": [
+        80,
+        640,
+        90,
+        400
+      ],
+      "max_reach_px": 525,
+      "min_reach_px": 180,
+      "min_reach_rise": 0.6,
+      "goal_height_px": [
+        0,
+        160
+      ]
+    },
+    "arm_bases": {
+      "A": [
+        200,
+        345
+      ],
+      "B": [
+        560,
+        345
+      ]
+    },
+    "lift": {
+      "min_px": 0,
+      "max_px": 170,
+      "rest_px": 60,
+      "delta_px": 2.5
+    },
+    "bimanual": {
+      "observation_dim": 44,
+      "action_dim": 14
+    },
+    "goal_tolerance_px": 8,
+    "lift_tolerance_px": 3,
+    "joint_axes": [
+      "yaw",
+      "pitch",
+      "pitch",
+      "yaw",
+      "pitch",
+      "yaw"
+    ]
+  },
   "families": [
-    {"id":"basics","name":"Basics","level":"GEOMETRY & REACH","blurb":"Validate the workspace, the control cadence, and your recording pipeline before any object is involved."},
-    {"id":"objects","name":"Object manipulation","level":"CORE MANIPULATION","blurb":"The best baseline family for most 6-DOF labs: grasp, transport, orient, and release rigid objects."},
-    {"id":"cleaning","name":"Surface cleaning","level":"CONTACT-RICH","blurb":"Force-aware trajectories and coverage. The arm stays in contact with a surface instead of moving through free space."},
-    {"id":"laundry","name":"Laundry handling","level":"COMPOUND / DEFORMABLE","blurb":"Deformable state is only partly observable. Start with towels: forgiving, and the state change is visible."},
-    {"id":"kitchen","name":"Kitchen & table reset","level":"MULTI-STEP","blurb":"The bridge from atomic skills to ordered, language-conditioned sequences."},
-    {"id":"recovery","name":"Failure recovery","level":"SYSTEM SKILL","blurb":"Detect, retreat, re-observe, retry within a budget, escalate. Generalization comes from a system, not a checkpoint."}
+    {
+      "id": "basics",
+      "name": "Basics",
+      "level": "GEOMETRY & REACH",
+      "blurb": "Validate the workspace, the control cadence, and your recording pipeline before any object is involved."
+    },
+    {
+      "id": "objects",
+      "name": "Object manipulation",
+      "level": "CORE MANIPULATION",
+      "blurb": "The best baseline family for most 6-DOF labs: grasp, transport, orient, and release rigid objects."
+    },
+    {
+      "id": "cleaning",
+      "name": "Surface cleaning",
+      "level": "CONTACT-RICH",
+      "blurb": "Force-aware trajectories and coverage. The arm stays in contact with a surface instead of moving through free space."
+    },
+    {
+      "id": "laundry",
+      "name": "Laundry handling",
+      "level": "COMPOUND / DEFORMABLE",
+      "blurb": "Deformable state is only partly observable. Start with towels: forgiving, and the state change is visible."
+    },
+    {
+      "id": "kitchen",
+      "name": "Kitchen & table reset",
+      "level": "MULTI-STEP",
+      "blurb": "The bridge from atomic skills to ordered, language-conditioned sequences."
+    },
+    {
+      "id": "recovery",
+      "name": "Failure recovery",
+      "level": "SYSTEM SKILL",
+      "blurb": "Detect, retreat, re-observe, retry within a budget, escalate. Generalization comes from a system, not a checkpoint."
+    }
   ],
   "workflows": [
     {
-      "id":"reach","number":"01","name":"Bin reach","family":"basics","difficulty":1,"horizon_steps":90,
-      "instruction":"Move the gripper above the amber marker and hold the pose.","goal":[570,170],"object":"target","metric":"distance < 20 mm",
-      "summary":"The calibration task. No grasp, no contact — just prove that the goal is reachable, the safety clamp holds, and an episode records cleanly.",
-      "success":"End-effector within 20 mm of the marker for 10 consecutive control steps with every action inside the joint-delta cap.",
-      "sensors":"Overhead RGB only. Joint encoders are the ground truth at this stage.",
-      "curriculum":["Single fixed marker","Marker moved between four corners of the workspace","Marker sampled uniformly in the reachable set","Marker placed near the reach boundary so the projection clamp fires"],
-      "failure_modes":["Goal outside the reachable radius is silently projected — check the projection before blaming the policy","IK settles in a joint-limit local minimum from an operator-dragged pose"],
-      "guardrail":"Nothing enters the workspace during this task. It is the task you run after any change to limits, gearing, or the safety wrapper.",
-      "baseline":"Scripted controller"
+      "id": "reach",
+      "number": "01",
+      "name": "Bin reach",
+      "family": "basics",
+      "difficulty": 1,
+      "horizon_steps": 90,
+      "instruction": "Move the gripper above the amber marker and hold the pose.",
+      "goal": [
+        570,
+        170
+      ],
+      "object": "target",
+      "metric": "distance < 20 mm",
+      "summary": "The calibration task. No grasp, no contact — just prove that the goal is reachable, the safety clamp holds, and an episode records cleanly.",
+      "success": "End-effector within 20 mm of the marker for 10 consecutive control steps with every action inside the joint-delta cap.",
+      "sensors": "Overhead RGB only. Joint encoders are the ground truth at this stage.",
+      "curriculum": [
+        "Single fixed marker",
+        "Marker moved between four corners of the workspace",
+        "Marker sampled uniformly in the reachable set",
+        "Marker placed near the reach boundary so the projection clamp fires"
+      ],
+      "failure_modes": [
+        "Goal outside the reachable radius is silently projected — check the projection before blaming the policy",
+        "IK settles in a joint-limit local minimum from an operator-dragged pose"
+      ],
+      "guardrail": "Nothing enters the workspace during this task. It is the task you run after any change to limits, gearing, or the safety wrapper.",
+      "baseline": "Scripted controller",
+      "arms": 1,
+      "goal_height": 45
     },
     {
-      "id":"pick-place","number":"02","name":"Pick & place","family":"objects","difficulty":2,"horizon_steps":160,
-      "instruction":"Approach the cube, close the gripper, then move it to the bin.","goal":[555,185],"object":"cube","metric":"grasp + placement",
-      "summary":"The reference skill of the whole library. Everything downstream is pick-and-place with more state, more steps, or more contact.",
-      "success":"Stable grasp held through transport, object released inside the bin footprint, and the arm retreats to a clear pose.",
-      "sensors":"Overhead RGB to begin; add a wrist camera as soon as the gripper occludes the object.",
-      "curriculum":["Fixed cube pose, fixed bin","Cube position randomized in a 15 cm patch","Cube orientation randomized","Two distractor objects added","Bin position randomized"],
-      "failure_modes":["Grasp closes early because the wrist camera is missing","Transport path clips the bin rim","Release happens before the object is over the bin"],
-      "guardrail":"Soft or light objects only. Set workspace, speed, and torque limits before a single demonstration is collected.",
-      "baseline":"ACT"
+      "id": "pick-place",
+      "number": "02",
+      "name": "Pick & place",
+      "family": "objects",
+      "difficulty": 2,
+      "horizon_steps": 160,
+      "instruction": "Approach the cube, close the gripper, then move it to the bin.",
+      "goal": [
+        555,
+        185
+      ],
+      "object": "cube",
+      "metric": "grasp + placement",
+      "summary": "The reference skill of the whole library. Everything downstream is pick-and-place with more state, more steps, or more contact.",
+      "success": "Stable grasp held through transport, object released inside the bin footprint, and the arm retreats to a clear pose.",
+      "sensors": "Overhead RGB to begin; add a wrist camera as soon as the gripper occludes the object.",
+      "curriculum": [
+        "Fixed cube pose, fixed bin",
+        "Cube position randomized in a 15 cm patch",
+        "Cube orientation randomized",
+        "Two distractor objects added",
+        "Bin position randomized"
+      ],
+      "failure_modes": [
+        "Grasp closes early because the wrist camera is missing",
+        "Transport path clips the bin rim",
+        "Release happens before the object is over the bin"
+      ],
+      "guardrail": "Soft or light objects only. Set workspace, speed, and torque limits before a single demonstration is collected.",
+      "baseline": "ACT",
+      "arms": 1,
+      "goal_height": 25
     },
     {
-      "id":"sort","number":"03","name":"Part sorting","family":"objects","difficulty":3,"horizon_steps":180,
-      "instruction":"Move the part from the workcell into its designated lane.","goal":[505,300],"object":"part","metric":"correct-bin rate",
-      "summary":"Pick-and-place plus a decision. The policy must read a visual property — colour, shape, label — and choose a destination from it.",
-      "success":"Correct-lane rate above 90% on held-out part placements, with mis-sorts recoverable rather than jammed.",
-      "sensors":"Overhead RGB for the class cue, wrist RGB for the grasp. Depth helps once parts overlap.",
-      "curriculum":["Two classes, high contrast","Three classes","Classes that differ by shape rather than colour","Parts presented in a cluttered pile"],
-      "failure_modes":["Policy memorizes position instead of the class cue — test by swapping lane assignments","Lighting change collapses the colour boundary"],
-      "guardrail":"Lanes must be physically separated so a mis-sort is a wrong bin, never a collision.",
-      "baseline":"ACT"
+      "id": "sort",
+      "number": "03",
+      "name": "Part sorting",
+      "family": "objects",
+      "difficulty": 3,
+      "horizon_steps": 180,
+      "instruction": "Move the part from the workcell into its designated lane.",
+      "goal": [
+        505,
+        300
+      ],
+      "object": "part",
+      "metric": "correct-bin rate",
+      "summary": "Pick-and-place plus a decision. The policy must read a visual property — colour, shape, label — and choose a destination from it.",
+      "success": "Correct-lane rate above 90% on held-out part placements, with mis-sorts recoverable rather than jammed.",
+      "sensors": "Overhead RGB for the class cue, wrist RGB for the grasp. Depth helps once parts overlap.",
+      "curriculum": [
+        "Two classes, high contrast",
+        "Three classes",
+        "Classes that differ by shape rather than colour",
+        "Parts presented in a cluttered pile"
+      ],
+      "failure_modes": [
+        "Policy memorizes position instead of the class cue — test by swapping lane assignments",
+        "Lighting change collapses the colour boundary"
+      ],
+      "guardrail": "Lanes must be physically separated so a mis-sort is a wrong bin, never a collision.",
+      "baseline": "ACT",
+      "arms": 1,
+      "goal_height": 25
     },
     {
-      "id":"stack","number":"04","name":"Cup stacking","family":"objects","difficulty":3,"horizon_steps":200,
-      "instruction":"Place the cup squarely on top of the stack without toppling it.","goal":[430,130],"object":"cup","metric":"stack height + stability",
-      "summary":"The first task where the goal pose depends on what the arm did previously. Placement tolerance shrinks with every layer.",
-      "success":"Three cups stacked and still standing five seconds after release; lateral offset under 8 mm per layer.",
-      "sensors":"Overhead RGB + wrist RGB. A compliant gripper buys more tolerance than a better policy does.",
-      "curriculum":["Place onto a fixed base cup","Two-cup stack","Three-cup stack","Base cup position randomized between layers"],
-      "failure_modes":["Release velocity topples the stack even though the pose was correct","Error accumulates across layers because each placement is scored independently"],
-      "guardrail":"Cap descent speed near contact. A stack collapse must not become a lateral sweep across the table.",
-      "baseline":"Diffusion Policy"
+      "id": "stack",
+      "number": "04",
+      "name": "Cup stacking",
+      "family": "objects",
+      "difficulty": 3,
+      "horizon_steps": 200,
+      "instruction": "Place the cup squarely on top of the stack without toppling it.",
+      "goal": [
+        430,
+        130
+      ],
+      "object": "cup",
+      "metric": "stack height + stability",
+      "summary": "The first task where the goal pose depends on what the arm did previously. Placement tolerance shrinks with every layer.",
+      "success": "Three cups stacked and still standing five seconds after release; lateral offset under 8 mm per layer.",
+      "sensors": "Overhead RGB + wrist RGB. A compliant gripper buys more tolerance than a better policy does.",
+      "curriculum": [
+        "Place onto a fixed base cup",
+        "Two-cup stack",
+        "Three-cup stack",
+        "Base cup position randomized between layers"
+      ],
+      "failure_modes": [
+        "Release velocity topples the stack even though the pose was correct",
+        "Error accumulates across layers because each placement is scored independently"
+      ],
+      "guardrail": "Cap descent speed near contact. A stack collapse must not become a lateral sweep across the table.",
+      "baseline": "Diffusion Policy",
+      "arms": 1,
+      "goal_height": 95
     },
     {
-      "id":"insert","number":"05","name":"Peg insertion","family":"objects","difficulty":4,"horizon_steps":200,
-      "instruction":"Align the peg with the hole and insert it without jamming.","goal":[350,150],"object":"peg","metric":"insertion depth + max force",
-      "summary":"The canonical contact-rich task. Position control alone will jam; the policy has to learn the small corrective wiggle.",
-      "success":"Full insertion depth reached with peak contact force under the configured limit, in under 15 seconds.",
-      "sensors":"Wrist RGB plus force/torque. This is the first task where an F/T sensor stops being optional.",
-      "curriculum":["Large clearance, chamfered hole","Tight clearance, chamfered","Tight clearance, no chamfer","Hole pose randomized within 10 mm"],
-      "failure_modes":["Jam detected as zero progress at high force — needs a retreat-and-retry, not more push","Multimodal corrective motions get averaged into nothing by a unimodal policy"],
-      "guardrail":"Force limiting belongs in the hardware wrapper, not in the learned policy. Insertion is the task most likely to damage a gearbox.",
-      "baseline":"Diffusion Policy"
+      "id": "insert",
+      "number": "05",
+      "name": "Peg insertion",
+      "family": "objects",
+      "difficulty": 4,
+      "horizon_steps": 200,
+      "instruction": "Align the peg with the hole and insert it without jamming.",
+      "goal": [
+        350,
+        150
+      ],
+      "object": "peg",
+      "metric": "insertion depth + max force",
+      "summary": "The canonical contact-rich task. Position control alone will jam; the policy has to learn the small corrective wiggle.",
+      "success": "Full insertion depth reached with peak contact force under the configured limit, in under 15 seconds.",
+      "sensors": "Wrist RGB plus force/torque. This is the first task where an F/T sensor stops being optional.",
+      "curriculum": [
+        "Large clearance, chamfered hole",
+        "Tight clearance, chamfered",
+        "Tight clearance, no chamfer",
+        "Hole pose randomized within 10 mm"
+      ],
+      "failure_modes": [
+        "Jam detected as zero progress at high force — needs a retreat-and-retry, not more push",
+        "Multimodal corrective motions get averaged into nothing by a unimodal policy"
+      ],
+      "guardrail": "Force limiting belongs in the hardware wrapper, not in the learned policy. Insertion is the task most likely to damage a gearbox.",
+      "baseline": "Diffusion Policy",
+      "arms": 1,
+      "goal_height": 55
     },
     {
-      "id":"wipe","number":"06","name":"Surface wipe","family":"cleaning","difficulty":3,"horizon_steps":200,
-      "instruction":"Pick up the cloth, cover the marked spill area, then return the tool.","goal":[300,360],"object":"cloth","metric":"area coverage %",
-      "summary":"Coverage rather than a single endpoint. The reward is spatial and the arm holds contact for the length of the episode.",
-      "success":"Coverage of the marked area above 95%, tool returned to its holder, and the end-effector never crosses the table edge.",
-      "sensors":"Overhead RGB for coverage scoring; a compliant end-effector or F/T sensor for contact.",
-      "curriculum":["Dry wipe of a fixed rectangle","Visually marked spill of varying shape","Repeated passes until coverage threshold","Cluttered table with objects to avoid","Choosing between two tools"],
-      "failure_modes":["Policy lifts off mid-stroke and coverage scoring silently keeps counting","Cloth slips in the gripper and the stroke continues on an empty tool"],
-      "guardrail":"Water only after electrical and slip hazards are controlled. Keep cleaning chemicals out of the training loop entirely.",
-      "baseline":"Diffusion Policy"
+      "id": "wipe",
+      "number": "06",
+      "name": "Surface wipe",
+      "family": "cleaning",
+      "difficulty": 3,
+      "horizon_steps": 200,
+      "instruction": "Pick up the cloth, cover the marked spill area, then return the tool.",
+      "goal": [
+        360,
+        385
+      ],
+      "object": "cloth",
+      "metric": "area coverage %",
+      "summary": "Coverage rather than a single endpoint. The reward is spatial and the arm holds contact for the length of the episode.",
+      "success": "Coverage of the marked area above 95%, tool returned to its holder, and the end-effector never crosses the table edge.",
+      "sensors": "Overhead RGB for coverage scoring; a compliant end-effector or F/T sensor for contact.",
+      "curriculum": [
+        "Dry wipe of a fixed rectangle",
+        "Visually marked spill of varying shape",
+        "Repeated passes until coverage threshold",
+        "Cluttered table with objects to avoid",
+        "Choosing between two tools"
+      ],
+      "failure_modes": [
+        "Policy lifts off mid-stroke and coverage scoring silently keeps counting",
+        "Cloth slips in the gripper and the stroke continues on an empty tool"
+      ],
+      "guardrail": "Water only after electrical and slip hazards are controlled. Keep cleaning chemicals out of the training loop entirely.",
+      "baseline": "Diffusion Policy",
+      "arms": 1,
+      "goal_height": 8
     },
     {
-      "id":"fold","number":"07","name":"Towel fold","family":"laundry","difficulty":4,"horizon_steps":200,
-      "instruction":"Separate an edge of the towel, lift it, and fold it over to the opposite edge.","goal":[250,140],"object":"towel","metric":"fold alignment tolerance",
-      "summary":"Deformable state you cannot fully observe. Towels are the entry point because the state change is large and visible from one camera.",
-      "success":"Folded edge within 3 cm of the opposite edge, no snagging, and the towel still in one piece on the table.",
-      "sensors":"Overhead RGB + wrist RGB. Depth helps enormously in finding a liftable edge.",
-      "curriculum":["Towel transfer between bins","Single fold from a flattened start","Fold from a lightly crumpled start","Colour sorting of towels","Mixed garment pickup"],
-      "failure_modes":["Gripper closes on two layers and the fold tears the stack apart","Edge detection succeeds but the lift angle drags the whole towel"],
-      "guardrail":"Keep the arm outside any appliance. Never automate a door, drum, or heat source without dedicated safety hardware.",
-      "baseline":"Diffusion Policy"
+      "id": "fold",
+      "number": "07",
+      "name": "Towel fold",
+      "family": "laundry",
+      "difficulty": 4,
+      "horizon_steps": 200,
+      "instruction": "Pin one edge with the left arm while the right arm lifts the opposite edge and folds it over.",
+      "goal": [
+        250,
+        180
+      ],
+      "goal_b": [
+        400,
+        180
+      ],
+      "object": "towel",
+      "metric": "fold alignment tolerance",
+      "summary": "Deformable state you cannot fully observe, and the first task that genuinely needs two grippers: one arm holds the towel flat while the other folds. Towels are the entry point because the state change is large and visible from one camera.",
+      "success": "Folded edge within 3 cm of the pinned edge, no snagging, and the towel still flat under the holding gripper.",
+      "sensors": "Overhead RGB + a wrist camera per arm. Depth helps enormously in finding a liftable edge.",
+      "curriculum": [
+        "Towel transfer between bins",
+        "Single fold from a flattened start",
+        "Fold from a lightly crumpled start",
+        "Colour sorting of towels",
+        "Mixed garment pickup"
+      ],
+      "failure_modes": [
+        "Gripper closes on two layers and the fold tears the stack apart",
+        "Edge detection succeeds but the lift angle drags the whole towel"
+      ],
+      "guardrail": "Keep the arm outside any appliance. Never automate a door, drum, or heat source without dedicated safety hardware.",
+      "baseline": "Diffusion Policy",
+      "arms": 2,
+      "goal_height": 15
     },
     {
-      "id":"drawer","number":"08","name":"Drawer opening","family":"objects","difficulty":4,"horizon_steps":200,
-      "instruction":"Grasp the handle, pull along the drawer axis, and release.","goal":[615,330],"object":"handle","metric":"opening distance + off-axis force",
-      "summary":"An articulated object: the environment, not the policy, decides the trajectory. Off-axis force is the thing to measure.",
-      "success":"Drawer opened at least 12 cm with off-axis force below the limit and the handle released cleanly.",
-      "sensors":"Wrist RGB for the handle, F/T for the constraint. Joint effort is a usable proxy if there is no F/T sensor.",
-      "curriculum":["Loose drawer, handle pre-aligned","Drawer at a fixed angle to the base","Drawer angle randomized","Stiff drawer requiring sustained pull"],
-      "failure_modes":["Arm fights the kinematic constraint and trips the effort limit","Grasp slips off a round handle under load"],
-      "guardrail":"Articulated objects must have a mechanical stop. Configure the effort limit below the point where the arm can move the furniture.",
-      "baseline":"ACT"
+      "id": "drawer",
+      "number": "08",
+      "name": "Drawer opening",
+      "family": "objects",
+      "difficulty": 4,
+      "horizon_steps": 200,
+      "instruction": "Grasp the handle, pull along the drawer axis, and release.",
+      "goal": [
+        615,
+        330
+      ],
+      "object": "handle",
+      "metric": "opening distance + off-axis force",
+      "summary": "An articulated object: the environment, not the policy, decides the trajectory. Off-axis force is the thing to measure.",
+      "success": "Drawer opened at least 12 cm with off-axis force below the limit and the handle released cleanly.",
+      "sensors": "Wrist RGB for the handle, F/T for the constraint. Joint effort is a usable proxy if there is no F/T sensor.",
+      "curriculum": [
+        "Loose drawer, handle pre-aligned",
+        "Drawer at a fixed angle to the base",
+        "Drawer angle randomized",
+        "Stiff drawer requiring sustained pull"
+      ],
+      "failure_modes": [
+        "Arm fights the kinematic constraint and trips the effort limit",
+        "Grasp slips off a round handle under load"
+      ],
+      "guardrail": "Articulated objects must have a mechanical stop. Configure the effort limit below the point where the arm can move the furniture.",
+      "baseline": "ACT",
+      "arms": 1,
+      "goal_height": 70
     },
     {
-      "id":"reset","number":"09","name":"Table reset","family":"kitchen","difficulty":5,"horizon_steps":200,
-      "instruction":"Clear the cups to the tray, then sort the utensils into their zone.","goal":[545,105],"object":"tray","metric":"ordered completion",
-      "summary":"Multi-step and order-dependent. This is where a language-conditioned policy starts earning its cost over a stack of specialists.",
-      "success":"Every object reaches its correct zone in the required order, with no spills, collisions, or unsafe contact.",
-      "sensors":"Overhead RGB + wrist RGB. Markers or barcodes are a legitimate shortcut for the first datasets.",
-      "curriculum":["One object type","Three object types","Ordered reset with a required sequence","Free-form natural-language request"],
-      "failure_modes":["Policy completes steps in the wrong order and the tray is blocked","Long horizon drifts: early success, late-episode collapse"],
-      "guardrail":"No knives, hot surfaces, glass, liquids, or food-contact tasks until there is a reviewed safety case for the whole cell.",
-      "baseline":"SmolVLA"
+      "id": "reset",
+      "number": "09",
+      "name": "Table reset",
+      "family": "kitchen",
+      "difficulty": 5,
+      "horizon_steps": 200,
+      "instruction": "Clear the left side to the tray while the right arm sorts the utensils into their zone.",
+      "goal": [
+        300,
+        140
+      ],
+      "goal_b": [
+        470,
+        140
+      ],
+      "object": "tray",
+      "metric": "ordered completion",
+      "summary": "Multi-step, order-dependent, and split across two arms working the same table without colliding. This is where a language-conditioned policy starts earning its cost over a stack of specialists.",
+      "success": "Every object reaches its correct zone in the required order, with no spills, collisions between the arms, or unsafe contact.",
+      "sensors": "Overhead RGB + a wrist camera per arm. Markers or barcodes are a legitimate shortcut for the first datasets.",
+      "curriculum": [
+        "One object type",
+        "Three object types",
+        "Ordered reset with a required sequence",
+        "Free-form natural-language request"
+      ],
+      "failure_modes": [
+        "Policy completes steps in the wrong order and the tray is blocked",
+        "Long horizon drifts: early success, late-episode collapse"
+      ],
+      "guardrail": "No knives, hot surfaces, glass, liquids, or food-contact tasks until there is a reviewed safety case for the whole cell.",
+      "baseline": "SmolVLA",
+      "arms": 2,
+      "goal_height": 40
     },
     {
-      "id":"handoff","number":"10","name":"Safe handoff","family":"kitchen","difficulty":4,"horizon_steps":150,
-      "instruction":"Bring the object to the handoff pose and wait for release.","goal":[620,260],"object":"object","metric":"safe completion",
-      "summary":"The first task with a person inside the workspace. The interesting behaviour is the waiting, not the reaching.",
-      "success":"Object presented at the handoff pose, arm holds still under the speed cap, and release happens only on an explicit signal.",
-      "sensors":"Overhead RGB, gripper state, and a separate presence channel that is not the learned policy's to interpret.",
-      "curriculum":["Handoff to a fixed fixture","Handoff to a static hand","Handoff with the receiver moving","Receiver aborts mid-handoff"],
-      "failure_modes":["Policy releases on visual similarity rather than the signal","Arm keeps tracking a receding hand outside the safe zone"],
-      "guardrail":"Human-adjacent operation needs a speed and separation monitor, a dead-man control, and a physical e-stop. The browser lab cannot model any of them.",
-      "baseline":"SmolVLA"
+      "id": "handoff",
+      "number": "10",
+      "name": "Safe handoff",
+      "family": "kitchen",
+      "difficulty": 4,
+      "horizon_steps": 150,
+      "instruction": "Present the object with the left arm and take it with the right, then release.",
+      "goal": [
+        320,
+        180
+      ],
+      "goal_b": [
+        440,
+        180
+      ],
+      "object": "object",
+      "metric": "safe completion",
+      "summary": "An arm-to-arm handoff: the release of one gripper has to be conditioned on the grasp of the other. The interesting behaviour is the waiting, not the reaching. The same contract covers a handoff to a person, where the second arm is replaced by a hand and the safety case gets much larger.",
+      "success": "Object transferred with both grippers closed on it for at least 10 control steps, then a clean release and retreat by the presenting arm.",
+      "sensors": "Overhead RGB, both gripper states, and — for a human receiver — a presence channel that is not the learned policy’s to interpret.",
+      "curriculum": [
+        "Handoff to a fixed fixture",
+        "Handoff to a static hand",
+        "Handoff with the receiver moving",
+        "Receiver aborts mid-handoff"
+      ],
+      "failure_modes": [
+        "Policy releases on visual similarity rather than the signal",
+        "Arm keeps tracking a receding hand outside the safe zone"
+      ],
+      "guardrail": "Human-adjacent operation needs a speed and separation monitor, a dead-man control, and a physical e-stop. The browser lab cannot model any of them.",
+      "baseline": "SmolVLA",
+      "arms": 2,
+      "goal_height": 120
     },
     {
-      "id":"recovery","number":"11","name":"Failure recovery","family":"recovery","difficulty":5,"horizon_steps":200,
-      "instruction":"Detect the dropped object, retreat, re-observe, and attempt one safe retry.","goal":[480,375],"object":"dropped item","metric":"safe retry rate",
-      "summary":"Not a manipulation skill — a system skill. The measurable outcome is what happens after something goes wrong.",
-      "success":"Robot halts safely, classifies the failure, and either completes or escalates within a bounded retry budget.",
-      "sensors":"The task cameras plus gripper state, joint effort, and an explicit stop channel independent of the policy.",
-      "curriculum":["Missed grasp","Dropped item mid-transport","Target occluded by a distractor","Destination zone unavailable","Escalate to a human handoff"],
-      "failure_modes":["Retry loop with no budget becomes an unbounded hammering motion","Failure classified as success because the reward only reads the final pose"],
-      "guardrail":"Every learned policy needs a deterministic stop, a retreat pose, and a human takeover path. Build this before the policy that needs it.",
-      "baseline":"ACT + scripted supervisor"
+      "id": "recovery",
+      "number": "11",
+      "name": "Failure recovery",
+      "family": "recovery",
+      "difficulty": 5,
+      "horizon_steps": 200,
+      "instruction": "Detect the dropped object, retreat, re-observe, and attempt one safe retry.",
+      "goal": [
+        480,
+        375
+      ],
+      "object": "dropped item",
+      "metric": "safe retry rate",
+      "summary": "Not a manipulation skill — a system skill. The measurable outcome is what happens after something goes wrong.",
+      "success": "Robot halts safely, classifies the failure, and either completes or escalates within a bounded retry budget.",
+      "sensors": "The task cameras plus gripper state, joint effort, and an explicit stop channel independent of the policy.",
+      "curriculum": [
+        "Missed grasp",
+        "Dropped item mid-transport",
+        "Target occluded by a distractor",
+        "Destination zone unavailable",
+        "Escalate to a human handoff"
+      ],
+      "failure_modes": [
+        "Retry loop with no budget becomes an unbounded hammering motion",
+        "Failure classified as success because the reward only reads the final pose"
+      ],
+      "guardrail": "Every learned policy needs a deterministic stop, a retreat pose, and a human takeover path. Build this before the policy that needs it.",
+      "baseline": "ACT + scripted supervisor",
+      "arms": 1,
+      "goal_height": 10
     }
   ],
   "models": [
-    {"name":"ACT","route":"starter","kind":"Specialist baseline","use":"Fast, task-specific imitation baseline for a fixed workcell. The dependable first learned policy for short, well-scoped, teleoperated skills.","notes":["Action chunking","Low deployment cost","Use as the control baseline"],"tags":["LeRobot","fast inference","small datasets"],"url":"https://huggingface.co/docs/lerobot/act"},
-    {"name":"Diffusion Policy","route":"starter","kind":"Specialist baseline","use":"Generates action sequences by denoising. A strong fit for multimodal, contact-rich motion such as insertion, folding, and wiping.","notes":["Handles multimodal actions","Contact-rich trajectories","Heavier inference than ACT"],"tags":["LeRobot","contact-rich","trajectory"],"url":"https://diffusion-policy.cs.columbia.edu/"},
-    {"name":"SmolVLA","route":"open","kind":"Recommended starting point","use":"Fine-tunable open vision-language-action policy for camera-guided, SO-101-style manipulation when compute and data are constrained.","notes":["450M base model","Language + multi-camera conditioning","Fine-tune on task demonstrations"],"tags":["LeRobot","open","language"],"url":"https://huggingface.co/docs/lerobot/smolvla"},
-    {"name":"OpenVLA","route":"open","kind":"Open generalist","use":"Open 7B vision-language-action model for generalist manipulation. Fine-tune it when instructions, visual variation, and broad task coverage matter.","notes":["7B parameters","Open checkpoints and code","Needs real GPU budget"],"tags":["7B","fine-tune","manipulation"],"url":"https://openvla.github.io/"},
-    {"name":"π₀ / π₀.₅","route":"frontier","kind":"Research reference","use":"Flow-based generalist robot policies from Physical Intelligence. A reference point for open-world, long-horizon, multi-task robot learning.","notes":["Flow-matching actions","Heterogeneous robot data","Requires separate access / integration"],"tags":["generalist","flow matching","research"],"url":"https://www.physicalintelligence.company/research/"},
-    {"name":"GR00T N1.x","route":"frontier","kind":"Research reference","use":"NVIDIA's open robot foundation-model family, paired with Isaac data and simulation tooling. Strongest fit when the Isaac ecosystem is already in play.","notes":["Isaac Lab integration","Open model weights","Synthetic data pipeline"],"tags":["Isaac","open model","synthetic data"],"url":"https://developer.nvidia.com/isaac/gr00t"}
+    {
+      "name": "ACT",
+      "route": "starter",
+      "kind": "Specialist baseline",
+      "use": "Fast, task-specific imitation baseline for a fixed workcell. The dependable first learned policy for short, well-scoped, teleoperated skills.",
+      "notes": [
+        "Action chunking",
+        "Low deployment cost",
+        "Use as the control baseline"
+      ],
+      "tags": [
+        "LeRobot",
+        "fast inference",
+        "small datasets"
+      ],
+      "url": "https://huggingface.co/docs/lerobot/act"
+    },
+    {
+      "name": "Diffusion Policy",
+      "route": "starter",
+      "kind": "Specialist baseline",
+      "use": "Generates action sequences by denoising. A strong fit for multimodal, contact-rich motion such as insertion, folding, and wiping.",
+      "notes": [
+        "Handles multimodal actions",
+        "Contact-rich trajectories",
+        "Heavier inference than ACT"
+      ],
+      "tags": [
+        "LeRobot",
+        "contact-rich",
+        "trajectory"
+      ],
+      "url": "https://diffusion-policy.cs.columbia.edu/"
+    },
+    {
+      "name": "SmolVLA",
+      "route": "open",
+      "kind": "Recommended starting point",
+      "use": "Fine-tunable open vision-language-action policy for camera-guided, SO-101-style manipulation when compute and data are constrained.",
+      "notes": [
+        "450M base model",
+        "Language + multi-camera conditioning",
+        "Fine-tune on task demonstrations"
+      ],
+      "tags": [
+        "LeRobot",
+        "open",
+        "language"
+      ],
+      "url": "https://huggingface.co/docs/lerobot/smolvla"
+    },
+    {
+      "name": "OpenVLA",
+      "route": "open",
+      "kind": "Open generalist",
+      "use": "Open 7B vision-language-action model for generalist manipulation. Fine-tune it when instructions, visual variation, and broad task coverage matter.",
+      "notes": [
+        "7B parameters",
+        "Open checkpoints and code",
+        "Needs real GPU budget"
+      ],
+      "tags": [
+        "7B",
+        "fine-tune",
+        "manipulation"
+      ],
+      "url": "https://openvla.github.io/"
+    },
+    {
+      "name": "π₀ / π₀.₅",
+      "route": "frontier",
+      "kind": "Research reference",
+      "use": "Flow-based generalist robot policies from Physical Intelligence. A reference point for open-world, long-horizon, multi-task robot learning.",
+      "notes": [
+        "Flow-matching actions",
+        "Heterogeneous robot data",
+        "Requires separate access / integration"
+      ],
+      "tags": [
+        "generalist",
+        "flow matching",
+        "research"
+      ],
+      "url": "https://www.physicalintelligence.company/research/"
+    },
+    {
+      "name": "GR00T N1.x",
+      "route": "frontier",
+      "kind": "Research reference",
+      "use": "NVIDIA's open robot foundation-model family, paired with Isaac data and simulation tooling. Strongest fit when the Isaac ecosystem is already in play.",
+      "notes": [
+        "Isaac Lab integration",
+        "Open model weights",
+        "Synthetic data pipeline"
+      ],
+      "tags": [
+        "Isaac",
+        "open model",
+        "synthetic data"
+      ],
+      "url": "https://developer.nvidia.com/isaac/gr00t"
+    }
   ],
   "datasets": [
-    {"name":"LeRobotDataset recordings","type":"First-party collection target","purpose":"Teleoperation, camera frames, state/action and task text for the specific workcell.","license":"Set by publisher","url":"https://huggingface.co/docs/lerobot/lerobot-dataset-v3"},
-    {"name":"SVLA SO-101 pick-place","type":"Reference demonstrations","purpose":"Example dataset and task setup for SmolVLA fine-tuning and real SO-101 pick-and-place.","license":"See dataset card","url":"https://huggingface.co/datasets/lerobot/svla_so101_pickplace"},
-    {"name":"Open X-Embodiment","type":"Pretraining corpus","purpose":"Cross-embodiment demonstrations used to pretrain generalist policies before task-specific fine-tuning.","license":"Per-contributor terms","url":"https://robotics-transformer-x.github.io/"},
-    {"name":"DROID","type":"Pretraining corpus","purpose":"Large in-the-wild manipulation dataset collected across many scenes and operators.","license":"See dataset terms","url":"https://droid-dataset.github.io/"},
-    {"name":"RoboCasa / LIBERO","type":"Simulation evaluation","purpose":"Held-out scene and task evaluation before considering hardware deployment.","license":"See project terms","url":"https://huggingface.co/docs/lerobot/robocasa"}
+    {
+      "name": "LeRobotDataset recordings",
+      "type": "First-party collection target",
+      "purpose": "Teleoperation, camera frames, state/action and task text for the specific workcell.",
+      "license": "Set by publisher",
+      "url": "https://huggingface.co/docs/lerobot/lerobot-dataset-v3"
+    },
+    {
+      "name": "SVLA SO-101 pick-place",
+      "type": "Reference demonstrations",
+      "purpose": "Example dataset and task setup for SmolVLA fine-tuning and real SO-101 pick-and-place.",
+      "license": "See dataset card",
+      "url": "https://huggingface.co/datasets/lerobot/svla_so101_pickplace"
+    },
+    {
+      "name": "Open X-Embodiment",
+      "type": "Pretraining corpus",
+      "purpose": "Cross-embodiment demonstrations used to pretrain generalist policies before task-specific fine-tuning.",
+      "license": "Per-contributor terms",
+      "url": "https://robotics-transformer-x.github.io/"
+    },
+    {
+      "name": "DROID",
+      "type": "Pretraining corpus",
+      "purpose": "Large in-the-wild manipulation dataset collected across many scenes and operators.",
+      "license": "See dataset terms",
+      "url": "https://droid-dataset.github.io/"
+    },
+    {
+      "name": "RoboCasa / LIBERO",
+      "type": "Simulation evaluation",
+      "purpose": "Held-out scene and task evaluation before considering hardware deployment.",
+      "license": "See project terms",
+      "url": "https://huggingface.co/docs/lerobot/robocasa"
+    }
   ]
 }
