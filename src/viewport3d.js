@@ -12,7 +12,7 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { ARM, ARM_B, forwardKinematics } from './core.js';
+import { ARM, ARM_B, clamp, forwardKinematics, GOAL_Z } from './core.js';
 
 const PX = 100; // scene pixels per world unit
 const UP = new THREE.Vector3(0, 1, 0);
@@ -152,10 +152,28 @@ function makeGoal(mirrored) {
   cube.castShadow = true;
   group.add(cube);
 
-  return { group, cube, beam };
+  // Up/down arrows above and below the cube: the affordance that says the
+  // object's height is something you can take hold of.
+  const handleMaterial = new THREE.MeshBasicMaterial({ color: COLORS.goal, transparent: true, opacity: 0 });
+  const handles = [1, -1].map((side) => {
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.14, 14), handleMaterial);
+    cone.rotation.x = side > 0 ? 0 : Math.PI;
+    cone.position.y = side * 0.24;
+    return cone;
+  });
+  group.add(...handles);
+
+  // A generous invisible cylinder so the cube is easy to grab on a small screen.
+  const grip = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.2, 0.2, 0.62, 10),
+    new THREE.MeshBasicMaterial({ visible: false }),
+  );
+  group.add(grip);
+
+  return { group, cube, beam, grip, handles, handleMaterial };
 }
 
-export function createViewport3D(container, { workspace, onGoalPick }) {
+export function createViewport3D(container, { workspace, onGoalPick, onGoalHeight }) {
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
@@ -205,23 +223,103 @@ export function createViewport3D(container, { workspace, onGoalPick }) {
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
   const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  const dragPlane = new THREE.Plane();
   const hit = new THREE.Vector3();
   let pressedAt = null;
+  let hovered = null;
+  let drag = null;
 
-  const onPointerDown = (event) => { pressedAt = { x: event.clientX, y: event.clientY }; };
-  const onPointerUp = (event) => {
-    if (!pressedAt || !onGoalPick) return;
-    const dragged = Math.hypot(event.clientX - pressedAt.x, event.clientY - pressedAt.y) > 6;
-    pressedAt = null;
-    if (dragged) return;
+  const setPointer = (event) => {
     const rect = renderer.domElement.getBoundingClientRect();
     pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
     raycaster.setFromCamera(pointer, camera);
+  };
+
+  /** The visible goal object under the pointer, if any. */
+  const pickGoal = (event) => {
+    setPointer(event);
+    const grips = rigs.filter((rig) => rig.goal.group.visible).map((rig) => rig.goal.grip);
+    const [first] = raycaster.intersectObjects(grips, false);
+    return first ? rigs.find((rig) => rig.goal.grip === first.object) : null;
+  };
+
+  /**
+   * Stand a plane up through the goal, facing the camera.
+   *
+   * Dragging then reads height straight off the ray/plane intersection, so the
+   * cube tracks the pointer exactly instead of drifting as the camera orbits.
+   */
+  const facingPlane = (origin) => {
+    const normal = new THREE.Vector3().subVectors(camera.position, origin);
+    normal.y = 0;
+    if (normal.lengthSq() < 1e-6) normal.set(0, 0, 1);
+    dragPlane.setFromNormalAndCoplanarPoint(normal.normalize(), origin);
+    return dragPlane;
+  };
+
+  const setHovered = (rig) => {
+    if (hovered === rig) return;
+    if (hovered) hovered.goal.handleMaterial.opacity = 0;
+    hovered = rig;
+    if (hovered) hovered.goal.handleMaterial.opacity = 0.9;
+    renderer.domElement.style.cursor = rig ? 'ns-resize' : '';
+  };
+
+  const onPointerDown = (event) => {
+    pressedAt = { x: event.clientX, y: event.clientY };
+    const rig = pickGoal(event);
+    if (!rig || !onGoalHeight) return;
+    const origin = rig.goal.cube.getWorldPosition(new THREE.Vector3());
+    if (!raycaster.ray.intersectPlane(facingPlane(origin), hit)) return;
+    // Grab the cube where it was actually clicked, so it does not jump.
+    drag = { rig, offset: hit.y - origin.y };
+    controls.enabled = false;
+    setHovered(rig);
+    renderer.domElement.setPointerCapture(event.pointerId);
+  };
+
+  const onPointerMove = (event) => {
+    if (!drag) {
+      setHovered(pickGoal(event));
+      return;
+    }
+    setPointer(event);
+    const origin = drag.rig.goal.cube.getWorldPosition(new THREE.Vector3());
+    if (!raycaster.ray.intersectPlane(facingPlane(origin), hit)) return;
+    const height = clamp((hit.y - drag.offset) * PX, GOAL_Z.min, GOAL_Z.max);
+    onGoalHeight(drag.rig.arm.id, height, { committed: false });
+  };
+
+  const endDrag = (event) => {
+    if (!drag) return false;
+    const { rig } = drag;
+    drag = null;
+    controls.enabled = true;
+    if (renderer.domElement.hasPointerCapture?.(event.pointerId)) renderer.domElement.releasePointerCapture(event.pointerId);
+    // Replanning is deferred to the release: solving on every pointer move
+    // would put a full IK search inside the drag loop.
+    onGoalHeight(rig.arm.id, null, { committed: true });
+    return true;
+  };
+
+  const onPointerUp = (event) => {
+    const wasDragging = endDrag(event);
+    const start = pressedAt;
+    pressedAt = null;
+    if (wasDragging || !start || !onGoalPick) return;
+    if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 6) return;
+    setPointer(event);
     if (!raycaster.ray.intersectPlane(floorPlane, hit)) return;
     onGoalPick([hit.x * PX + ARM.base[0], hit.z * PX + ARM.base[1]]);
   };
+
+  const onPointerLeave = () => { if (!drag) setHovered(null); };
+
   renderer.domElement.addEventListener('pointerdown', onPointerDown);
+  renderer.domElement.addEventListener('pointermove', onPointerMove);
   renderer.domElement.addEventListener('pointerup', onPointerUp);
+  renderer.domElement.addEventListener('pointercancel', onPointerUp);
+  renderer.domElement.addEventListener('pointerleave', onPointerLeave);
 
   const resize = () => {
     const width = container.clientWidth;
@@ -263,6 +361,8 @@ export function createViewport3D(container, { workspace, onGoalPick }) {
     rig.goal.group.position.set(goal.x, 0, goal.z);
     rig.goal.cube.position.y = goal.y;
     rig.goal.cube.rotation.y += 0.004;
+    rig.goal.grip.position.y = goal.y;
+    rig.goal.handles.forEach((handle, index) => { handle.position.y = goal.y + (index === 0 ? 0.24 : -0.24); });
     rig.goal.beam.scale.y = Math.max(goal.y, 0.001);
     rig.goal.beam.position.y = goal.y / 2;
   }
@@ -293,7 +393,10 @@ export function createViewport3D(container, { workspace, onGoalPick }) {
       this.stop();
       observer.disconnect();
       renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+      renderer.domElement.removeEventListener('pointermove', onPointerMove);
       renderer.domElement.removeEventListener('pointerup', onPointerUp);
+      renderer.domElement.removeEventListener('pointercancel', onPointerUp);
+      renderer.domElement.removeEventListener('pointerleave', onPointerLeave);
       controls.dispose();
       scene.traverse((node) => {
         if (node.geometry) node.geometry.dispose();
