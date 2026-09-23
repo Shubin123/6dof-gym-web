@@ -35,7 +35,11 @@ const state = {
   safetyNotice: null,
   voice: { dataUrl: null, mimeType: null, transcript: '', audioUrl: null, recorder: null, recognition: null, stream: null, bytes: 0, captureTimeout: null },
   frameHistory: [],
-  cloth2d: new ClothSimulator({ columns: 12, rows: 9, width: 1.5, height: 1.2 }),
+  // Must match the 3D viewport's cloth grid (src/viewport3d.js makeCloth) —
+  // frame history stores whichever simulator's snapshot was available, and
+  // restore() does a raw Float32Array.set() into this instance, so a size
+  // mismatch throws when scrubbing the timeline.
+  cloth2d: new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2 }),
   timeline: { currentStep: 0, totalSteps: 0, scrubbing: false },
 };
 
