@@ -966,6 +966,15 @@ function resetArms() {
   state.timeline.scrubbing = false;
   state.cloth2d?.reset();
   viewport.instance?.resetCloth?.();
+  // The sim-time readout and any pending voice auto-stop are timers, not
+  // policy/episode state, and neither was touched here — the clock kept
+  // counting from page load and a running capture kept its own countdown
+  // across a reset.
+  state.startedAt = performance.now();
+  if (state.voice.captureTimeout) {
+    clearTimeout(state.voice.captureTimeout);
+    state.voice.captureTimeout = null;
+  }
   syncSliders();
   updateArms();
   updateTimelineSlider();
