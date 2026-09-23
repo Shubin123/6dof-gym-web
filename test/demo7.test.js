@@ -58,8 +58,8 @@ test('Demo 7 bimanual folding motion plans safely and reaches folded target', ()
   const finalA = forwardKinematics(prev[0], ARM).points.at(-1);
   const finalB = forwardKinematics(prev[1], ARM_B).points.at(-1);
 
-  // Arm A should remain pinned at left goal
-  assert.ok(distance(finalA, [250, 180, 15]) < 2.5, 'Arm A holds left pinning target');
+  // Arm A pins first, then retracts so Arm B can place onto the fold line.
+  assert.ok(distance(finalA, forwardKinematics(HOME_POSE, ARM).points.at(-1)) < 2.5, 'Arm A retracts clear after pinning');
   // Arm B should fold over the center line (x=325) toward Arm A
   assert.ok(finalB[0] < 325, `Arm B crossed midline to ${finalB[0]}`);
   assert.ok(finalB[2] < 40, `Arm B placed down on table: z=${finalB[2]}`);
@@ -102,7 +102,8 @@ test('Realistic cloth physics interacts with Demo 7 folding trajectory', () => {
   }
 
   // Verify corners were captured
-  assert.equal(cloth.captured[0], true, 'Left corner captured by Arm A');
+  assert.equal(cloth.wasCaptured[0], true, 'Left corner captured by Arm A before its planned release');
+  assert.equal(cloth.captured[0], false, 'Arm A releases the pinned edge before Arm B crosses the fold line');
   assert.equal(cloth.captured[1], true, 'Right corner captured by Arm B');
 
   // Verify folding metrics
@@ -178,4 +179,3 @@ test('Policy progress bar tracks demo policy execution smoothly from 0% to 100%'
   }
   assert.equal(computePolicyProgress(totalSteps, totalSteps), 100, 'Reaches 100% on completion');
 });
-

@@ -139,12 +139,15 @@ test('Snapshot and restore support instant timeline frame loading', () => {
   for (let s = 0; s < 25; s += 1) {
     sim.step({ targetA: { x: -0.4, y: -0.3, z: 0.3 } });
   }
-  const deformedPos = sim.positions[0];
-  assert.notEqual(deformedPos, snap1.positions[0]);
+  // The captured corner is intentionally kinematic; inspect its neighbouring
+  // free vertex to prove that the saved cloth state actually differs.
+  const freeVertexX = 3;
+  const deformedPos = sim.positions[freeVertexX];
+  assert.notEqual(deformedPos, snap1.positions[freeVertexX]);
 
   // Restore snapshot
   sim.restore(snap1);
-  assert.equal(sim.positions[0], snap1.positions[0]);
+  assert.equal(sim.positions[freeVertexX], snap1.positions[freeVertexX]);
   assert.deepEqual(sim.captured, snap1.captured);
 });
 

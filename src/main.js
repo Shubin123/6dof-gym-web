@@ -801,7 +801,7 @@ function loadWorkflow(id, { scroll = false } = {}) {
   state.policy.path = null;
   state.policy.pathIndex = 0;
   state.policy.accumulator = 0;
-  state.policy.budget = workflow.id === 'fold' ? 360 : workflow.horizon_steps;
+  state.policy.budget = workflow.id === 'fold' ? 400 : workflow.horizon_steps;
   state.policy.loop = workflow.id === 'fold';
   $('#policy-loop').checked = state.policy.loop;
   $('#policy-budget').value = state.policy.budget;

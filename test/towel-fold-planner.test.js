@@ -28,7 +28,7 @@ test('planTowelFoldMotion produces a valid collision-free bimanual folding traje
 
   const tipA = forwardKinematics(previous[0], ARM).points.at(-1);
   const tipB = forwardKinematics(previous[1], ARM_B).points.at(-1);
-  assert.ok(distance(tipA, [250, 180, 15]) < 2, 'Arm A pinned at left edge');
+  assert.ok(distance(tipA, forwardKinematics(HOME_POSE, ARM).points.at(-1)) < 2, 'Arm A retracts clear after pinning');
   assert.ok(tipB[0] < 325, 'Arm B folded across towel midline');
-  assert.ok(distance(tipA, tipB) < 70, 'Folded edge is close to pinned edge');
+  assert.ok(distance(tipB, [250, 180, 6]) < 2, 'Arm B places the folded edge at the pinned-side target');
 });

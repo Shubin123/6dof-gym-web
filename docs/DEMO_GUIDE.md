@@ -12,7 +12,7 @@ ArmLab is a browser-only simulation for checking task geometry, recording the in
 
 Use **Reset** for a full scenario reset: it restores home poses, both task goal cubes and their declared heights, Arm A as the active controller, the cloth/timeline state, and fresh collision-checked IK plans. It does not leave a manually dragged cube or scrubbed frame as the base-policy start state.
 
-Use **Step budget** to set the run limit from 1 to 400 steps. Each task initially selects its recommended horizon; Towel fold starts at 200. Increasing the budget lets a run continue longer, but never bypasses the safety checks.
+Use **Step budget** to set the run limit from 1 to 400 steps. Each task initially selects its recommended horizon; Towel fold starts at 400 so its lift, release, cross-over, placement, and settle stages all complete. Increasing the budget lets a run continue longer, but never bypasses the safety checks.
 
 Before free-space motion begins, the planner uses two stages: it first finds a safe route, then a reducer retests longer shortcuts at the normal per-joint step cap. A shortcut is kept only if every resampled frame clears the floor, table boundary, and other arm. Towel fold keeps its full pin, lift, cross, placement, and cloth-settling frames because reducing the dynamic phases would stretch the cloth unrealistically.
 
@@ -44,7 +44,7 @@ The 3-D viewport is loaded only after selecting **3D**. It needs a browser with 
 
 **Towel fold**, **Table reset**, and **Safe handoff** use both arms. The **Arm A / Arm B** switch selects which joint sliders and Goal Z control operate. The planner evaluates both safe arm orders and maintains the configured inter-arm clearance throughout the path.
 
-Scenario 07, **Towel fold**, also labels its task-specific browser controller and displays a gripper-constrained spring cloth in 3-D. The towel falls to the table and only captures a corner when a tool reaches it; it is not animated by policy progress alone. The **Cloth frames** indicator retains and analyzes a rolling 120-frame mesh history, reporting which corners are held and whether the cloth has settled. This browser model does not include cloth self-collision, friction, or material-specific dynamics, so it is a useful interaction illustration rather than a physical-cloth claim. Real training needs demonstrations, observations, and an external training runtime.
+Scenario 07, **Towel fold**, displays a gripper-constrained spring cloth in 3-D. The towel falls onto a frictional table, captures only when a tool reaches a corner, preserves layer thickness during cross-over, and records a rolling 120-frame mesh history for the loading slider. Arm A pins then releases its corner; that contact remains table-pinned while Arm B lifts, crosses, and lowers the opposite edge onto it. This is a bounded Position-Based Dynamics illustration—not a substitute for calibrated material parameters, perception, demonstrations, or an external training runtime—but it follows the displayed contact and constraint rules instead of animating the towel by policy progress alone.
 
 ## Recording and replay
 

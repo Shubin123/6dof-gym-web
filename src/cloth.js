@@ -24,11 +24,14 @@ export const DEFAULT_CLOTH_CONFIG = Object.freeze({
   damping: 0.02,
   tableFriction: 0.35,
   staticFriction: 0.003,
-  solverIterations: 6,
+  // Two extra PBD passes keep the compressed fold within the tensile bound
+  // while it is lowered onto the pinned layer.
+  solverIterations: 8,
   stretchStiffness: 0.95,
   shearStiffness: 0.75,
   bendStiffness: 0.45,
   graspRadius: 0.36,
+  releaseRadius: 0.52,
   historyLimit: 120,
   settleDisplacementLimit: 0.003,
 });
@@ -51,6 +54,7 @@ export class ClothSimulator {
     this.shearStiffness = this.config.shearStiffness;
     this.bendStiffness = this.config.bendStiffness;
     this.graspRadius = this.config.graspRadius;
+    this.releaseRadius = this.config.releaseRadius;
     this.historyLimit = this.config.historyLimit;
     this.settleDisplacementLimit = this.config.settleDisplacementLimit;
 
@@ -62,6 +66,10 @@ export class ClothSimulator {
     this.invMass = new Float32Array(this.numVertices);
 
     this.captured = [false, false];
+    this.wasCaptured = [false, false];
+    this.graspOrigins = [null, null];
+    this.released = [false, false];
+    this.tablePinA = null;
     this.anchorsA = [];
     this.anchorsB = [];
 
@@ -160,6 +168,10 @@ export class ClothSimulator {
     this.velocities.fill(0);
     this.invMass.fill(1.0);
     this.captured = [false, false];
+    this.wasCaptured = [false, false];
+    this.graspOrigins = [null, null];
+    this.released = [false, false];
+    this.tablePinA = null;
     this.history = [];
     this.settled = false;
   }
@@ -174,28 +186,53 @@ export class ClothSimulator {
     const { targetA, targetB } = targets;
 
     // 1. Gripper contact / capture check
-    if (targetA) {
+    // A captured corner keeps its original contact point. Re-testing capture
+    // each frame would overwrite that point as the arm retracts, turning a
+    // deliberate release into an unrealistic "air-bending" tow.
+    if (targetA && !this.released[0] && !this.captured[0]) {
       const cornerA = 0;
       const d = Math.hypot(
         this.positions[cornerA * 3] - targetA.x,
         this.positions[cornerA * 3 + 1] - targetA.y,
         this.positions[cornerA * 3 + 2] - targetA.z,
       );
-      if (d < this.graspRadius) this.captured[0] = true;
+      if (d < this.graspRadius) {
+        this.captured[0] = true;
+        this.wasCaptured[0] = true;
+        this.graspOrigins[0] = { x: targetA.x, y: targetA.y, z: targetA.z };
+      }
     }
-    if (targetB) {
+    if (targetB && !this.released[1] && !this.captured[1]) {
       const cornerB = this.columns;
       const d = Math.hypot(
         this.positions[cornerB * 3] - targetB.x,
         this.positions[cornerB * 3 + 1] - targetB.y,
         this.positions[cornerB * 3 + 2] - targetB.z,
       );
-      if (d < this.graspRadius) this.captured[1] = true;
+      if (d < this.graspRadius) {
+        this.captured[1] = true;
+        this.wasCaptured[1] = true;
+        this.graspOrigins[1] = { x: targetB.x, y: targetB.y, z: targetB.z };
+      }
+    }
+    // The fold plan retracts Arm A after it has pressed the left edge to the
+    // table. Treat a departing gripper as an explicit release, allowing table
+    // friction to hold that edge while Arm B places the fold over it.
+    if (this.captured[0] && targetA) {
+      const origin = this.graspOrigins[0];
+      const d = origin ? Math.hypot(origin.x - targetA.x, origin.y - targetA.y, origin.z - targetA.z) : 0;
+      if (d > this.releaseRadius) {
+        this.captured[0] = false;
+        this.released[0] = true;
+        // The left edge was pressed onto the table before release. Preserve
+        // that contact as a table pin while the other gripper crosses over it.
+        this.tablePinA = { x: origin.x, y: origin.y, z: this.tableZ };
+      }
     }
 
     // Set inverse masses
     this.invMass.fill(1.0);
-    if (this.captured[0]) {
+    if (this.captured[0] || this.tablePinA) {
       for (const idx of this.anchorsA) this.invMass[idx] = 0;
     }
     if (this.captured[1]) {
@@ -262,6 +299,7 @@ export class ClothSimulator {
     };
 
     if (this.captured[0]) applyGripperAnchor(this.anchorsA, targetA);
+    if (this.tablePinA) applyGripperAnchor(this.anchorsA, this.tablePinA);
     if (this.captured[1]) applyGripperAnchor(this.anchorsB, targetB);
 
     // 4. Position-Based Dynamics (PBD) Constraint Relaxation
@@ -347,6 +385,7 @@ export class ClothSimulator {
 
       // Re-assert gripper anchors
       if (this.captured[0]) applyGripperAnchor(this.anchorsA, targetA);
+      if (this.tablePinA) applyGripperAnchor(this.anchorsA, this.tablePinA);
       if (this.captured[1]) applyGripperAnchor(this.anchorsB, targetB);
     }
 
@@ -377,6 +416,10 @@ export class ClothSimulator {
       positions: Float32Array.from(this.positions),
       prevPositions: Float32Array.from(this.prevPositions),
       captured: [...this.captured],
+      wasCaptured: [...this.wasCaptured],
+      graspOrigins: this.graspOrigins.map((origin) => origin && { ...origin }),
+      released: [...this.released],
+      tablePinA: this.tablePinA && { ...this.tablePinA },
       settled: this.settled,
     };
   }
@@ -387,6 +430,10 @@ export class ClothSimulator {
     this.positions.set(snap.positions);
     this.prevPositions.set(snap.prevPositions);
     this.captured = [...snap.captured];
+    this.wasCaptured = [...(snap.wasCaptured || snap.captured)];
+    this.graspOrigins = (snap.graspOrigins || [null, null]).map((origin) => origin && { ...origin });
+    this.released = [...(snap.released || [false, false])];
+    this.tablePinA = snap.tablePinA && { ...snap.tablePinA };
     this.settled = snap.settled;
   }
 

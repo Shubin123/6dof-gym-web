@@ -492,26 +492,55 @@ export function planTowelFoldMotion(poses, safety = {}) {
   for (const frame of approach.frames) frames.push([[...frame[0]], [...frame[1]]]);
   stageEnds.push(frames.length - 1);
 
+  let curA = planA.q;
   let curB = frames.length ? frames.at(-1)[1] : poses[1].q;
+  // Lift while Arm A pins, then retract Arm A before the folded edge crosses
+  // the pin. Keeping both tools at the fold line violates arm clearance and
+  // leaves the towel loose at x≈300 instead of placed on the pinned edge.
+  const liftWaypoint = [380, 180, 45];
+  const liftPlan = solveInverseKinematics(liftWaypoint, armB, safety, [{ q: curA, arm: armA }]);
+  if (!liftPlan?.safety?.safe) return null;
+  const liftPath = planSafeMotion(curB, liftPlan.q, armB, safety, [{ q: curA, arm: armA }]);
+  if (!liftPath) return null;
+  for (const q of liftPath) frames.push([[...curA], [...q]]);
+  stageEnds.push(frames.length - 1);
+  curB = liftPath.at(-1);
+
+  const retract = planSafeCellMotion(
+    [{ q: curA, arm: armA }, { q: curB, arm: armB }],
+    [[...HOME_POSE], curB],
+    safety,
+  );
+  if (!retract) return null;
+  for (const frame of retract.frames) frames.push([[...frame[0]], [...frame[1]]]);
+  stageEnds.push(frames.length - 1);
+  curA = retract.frames.at(-1)[0];
+  curB = retract.frames.at(-1)[1];
+
   const foldWaypoints = [
-    [380, 180, 45],
-    [340, 180, 45],
-    [310, 180, 28],
+    [310, 180, 45],
+    [270, 180, 38],
+    // Set the delivered edge just above the table (and its lower layer), not
+    // at a hovering tool height. The thickness barrier supplies the final
+    // separation between the two towel layers.
+    [250, 180, 6],
   ];
   for (const wp of foldWaypoints) {
-    const planWp = solveInverseKinematics(wp, armB, safety, [{ q: planA.q, arm: armA }]);
+    const planWp = solveInverseKinematics(wp, armB, safety, [{ q: curA, arm: armA }]);
     if (!planWp?.safety?.safe) return null;
-    const path = planSafeMotion(curB, planWp.q, armB, safety, [{ q: planA.q, arm: armA }]);
+    const path = planSafeMotion(curB, planWp.q, armB, safety, [{ q: curA, arm: armA }]);
     if (!path) return null;
     for (const q of path) {
-      frames.push([[...planA.q], [...q]]);
+      frames.push([[...curA], [...q]]);
     }
     stageEnds.push(frames.length - 1);
     curB = path.at(-1);
   }
 
-  for (let h = 0; h < 12; h += 1) {
-    frames.push([[...planA.q], [...curB]]);
+  // A short settle phase lets the PBD cloth relax without exceeding the
+  // fold workflow's 400-step operating budget.
+  for (let h = 0; h < 4; h += 1) {
+    frames.push([[...curA], [...curB]]);
   }
 
   // Unlike free-space reaches, the fold phases drive a dynamic cloth model.
