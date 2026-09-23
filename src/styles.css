@@ -101,6 +101,7 @@
 .policy-progress-label{font:9px var(--mono);color:#c9fb5d;min-width:26px;text-align:right;letter-spacing:.3px}
 .solver-ticker{font:9px var(--mono);color:#6f8199;letter-spacing:.2px;opacity:.75;transition:opacity .2s ease,color .2s ease}
 .solver-ticker.running{color:#c9fb5d;opacity:1}
+.dataset-export{border-top:1px solid #d9d5cd;padding-top:16px;margin-top:18px}.dataset-export code{font:11px var(--mono);background:#eceae3;padding:1px 4px}#dataset-status{color:#a3401d}#dataset-status.ok{color:#45861a}
 @keyframes solver-sweep{0%{transform:translateX(-70%)}50%{transform:translateX(130%)}100%{transform:translateX(-70%)}}
 @keyframes solver-spin{to{transform:rotate(360deg)}}@keyframes solver-sweep{0%{transform:translateX(-70%)}50%{transform:translateX(130%)}100%{transform:translateX(-70%)}}
 .topbar nav a[aria-current="page"]{color:var(--ink);font-weight:600}

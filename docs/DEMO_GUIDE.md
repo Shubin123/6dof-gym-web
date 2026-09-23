@@ -60,6 +60,10 @@ To add a task-specific policy, add its recipe and optional profile in `src/task-
 
 Episodes are JSON previews with the task metadata, observations, safety-clamped actions, and optional voice fields. Import is limited to 8 MB. Voice capture is limited to 60 seconds and 5 MB; microphone and speech transcription depend on browser permissions and support. Audio can still be recorded when transcription is unavailable.
 
+### Building a dataset
+
+Below the single-episode controls, **Add to dataset** appends the current recording to an in-browser dataset instead of downloading it alone; the counter shows how many episodes are in it. **Download dataset** bundles them into one LeRobotDataset-shaped JSON (`info`/`tasks`/`episodes`/`frames`), and **Clear dataset** empties it. All episodes in one dataset must use the same arm count (single-arm tasks and bimanual tasks like Towel fold can't mix) - adding a mismatched episode is rejected with an explanation instead of silently corrupting the bundle. `scripts/lerobot_export.py` (see the [README](../README.md#exporting-a-demonstration-dataset)) turns the downloaded bundle into an actual LeRobotDataset directory with parquet files.
+
 ## Troubleshooting
 
 - **The policy halts at a safety boundary:** choose **Reset**, then retry. If it repeats after moving a goal, pick a location farther from the table edge and the other arm.

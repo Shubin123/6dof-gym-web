@@ -26,6 +26,7 @@ As of this writing the suite is 46 tests across 8 files, all passing, with line 
 | `test/towel-fold-planner.test.js` | `planTowelFoldMotion` in isolation: a valid, collision-free, bimanual route for the fold task specifically. |
 | `test/task-policies.test.js` | The declarative policy-recipe registry and the dense per-stage fold reward. |
 | `test/regression.test.js` | Contract-level edge cases the integration tests above only exercise incidentally: `reduceSafeCellMotion`'s `keepTailFrames`/`requiredFrameIndexes` options and its empty-input result, `policyRecipeFor`'s fallback for an unknown task, and `scoreTaskStages`'s neutral-default and fully-solved boundary cases. Added to close the coverage gaps a plain `npm run test:coverage` pass turns up after a change to `core.js` or `task-policies.js`. |
+| `test/dataset-export.test.js` | `buildDatasetManifest`: the empty-input and mixed-arm-count rejections, and that a multi-episode bundle gets correct feature shapes, deduplicated task indices, contiguous global frame indexing, and `next.done`/`next.success` flags. `scripts/lerobot_export.py` (Python, outside `npm test`) is verified by hand against a real downloaded bundle - see its own docstring. |
 
 ## Adding a regression test
 
