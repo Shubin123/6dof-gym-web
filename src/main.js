@@ -972,10 +972,18 @@ function haltPolicy(status = HALT.OPERATOR, { silent = false } = {}) {
 }
 
 function resetArms() {
+  const workflow = state.currentWorkflow;
   for (const armState of state.arms) {
     armState.q = [...HOME_POSE];
     armState.lastAction = Array(6).fill(0);
   }
+  // A full reset returns the entire task contract to its loaded state, not
+  // merely the joints. This puts both goal cubes back at their scenario
+  // locations/heights before the solver is asked to make a fresh safe plan.
+  setArmGoal(state.arms[0], [...workflow.goal, workflow.goal_height], { replan: false });
+  setArmGoal(state.arms[1], [...(workflow.goal_b || workflow.goal), workflow.goal_height], { replan: false });
+  state.activeArm = 0;
+  replanArms();
   state.step = 0;
   state.safetyNotice = null;
   state.policy.path = null;
@@ -997,6 +1005,7 @@ function resetArms() {
     clearTimeout(state.voice.captureTimeout);
     state.voice.captureTimeout = null;
   }
+  [...$('#arm-switch').children].forEach((chip, index) => chip.classList.toggle('active', index === state.activeArm));
   syncSliders();
   updateArms();
   updateTimelineSlider();

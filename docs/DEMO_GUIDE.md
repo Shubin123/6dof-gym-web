@@ -10,6 +10,8 @@ ArmLab is a browser-only simulation for checking task geometry, recording the in
 4. Use the joint sliders for manual poses. A proposed move is rejected if it would cross the floor, workspace edge, or the other arm's clearance zone.
 5. Select **Run demo policy** to follow a prevalidated geometric path. Select it again while it is running to halt safely. The status line always reports whether the run reached the goal, reached its step budget, met a safety boundary, or was stopped by the operator.
 
+Use **Reset** for a full scenario reset: it restores home poses, both task goal cubes and their declared heights, Arm A as the active controller, the cloth/timeline state, and fresh collision-checked IK plans. It does not leave a manually dragged cube or scrubbed frame as the base-policy start state.
+
 Use **Step budget** to set the run limit from 1 to 400 steps. Each task initially selects its recommended horizon; Towel fold starts at 200. Increasing the budget lets a run continue longer, but never bypasses the safety checks.
 
 Before free-space motion begins, the planner uses two stages: it first finds a safe route, then a reducer retests longer shortcuts at the normal per-joint step cap. A shortcut is kept only if every resampled frame clears the floor, table boundary, and other arm. Towel fold keeps its full pin, lift, cross, placement, and cloth-settling frames because reducing the dynamic phases would stretch the cloth unrealistically.

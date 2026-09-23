@@ -85,6 +85,8 @@ The demo planner is a transparent geometric controller, and a run is bounded rat
 - **Step budget.** The **Step budget** slider sets the maximum number of control steps (1–400). Each scenario loads its recommended horizon, including 200 for Towel fold; raise it to inspect a longer run or lower it to test bounded failure handling.
 - **Retry until goal.** When enabled, a run that exhausts its step budget returns to home and retries; a reached goal stops the run, and a safety halt is never retried automatically. Scenario 07 enables this by default.
 
+**Full reset** restores the selected scenario’s home poses, goal cubes and heights, active-arm selection, cloth/timeline state, and collision-checked IK plans. It is therefore safe to use after dragging a cube or scrubbing a recorded frame: the next base-policy run starts from the task’s declared contract rather than a leftover manual target.
+
 ### Scenario 07: Towel fold specialist
 
 Scenario 07 now identifies its task-specific browser controller and renders a spring-cloth approximation in the 3-D viewport. The towel responds to gravity, table contact, structural springs, and only attaches to a corner once the corresponding gripper reaches it; it is not morphed merely because a progress counter advances. The visible 120-frame rolling buffer reports its captured corners and whether the mesh has settled. It remains an intentionally limited browser approximation: it does not model self-collision, friction, material anisotropy, or real gripper contact. Training a learned policy would require recorded demonstrations, camera observations, a training runtime, and evaluation data that this static repository does not include.
