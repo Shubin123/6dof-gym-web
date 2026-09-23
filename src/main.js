@@ -31,7 +31,7 @@ const state = {
   replaying: false,
   familyFilter: 'all',
   modelFilter: 'all',
-  policy: { status: HALT.IDLE, steps: 0, speed: 1, budget: compiled.workflows[0].horizon_steps, loop: false, frame: null, accumulator: 0, restart: null, path: null, pathIndex: 0, solveStartedAt: null, planning: false, planningToken: 0 },
+  policy: { status: HALT.IDLE, steps: 0, speed: 1, budget: compiled.workflows[0].horizon_steps, loop: false, frame: null, accumulator: 0, restart: null, path: null, pathIndex: 0, solveStartedAt: null, planning: false, planningToken: 0, planningPhase: null },
   safetyNotice: null,
   voice: { dataUrl: null, mimeType: null, transcript: '', audioUrl: null, recorder: null, recognition: null, stream: null, bytes: 0, captureTimeout: null },
   frameHistory: [],
@@ -418,7 +418,7 @@ function updateSolverTicker() {
   const total = state.policy.path?.length || (state.policy.status === HALT.RUNNING ? policyBudget() : 0);
   const elapsedMs = state.policy.solveStartedAt !== null ? performance.now() - state.policy.solveStartedAt : 0;
   el.textContent = planning
-    ? `Planning · trying IK seeds + safe routes · ${(elapsedMs / 1000).toFixed(1)}s`
+    ? `Planning · ${state.policy.planningPhase || 'starting'} · ${(elapsedMs / 1000).toFixed(1)}s`
     : formatSolverTicker({ steps: state.policy.steps, totalSteps: total, elapsedMs });
   el.classList.toggle('running', state.policy.status === HALT.RUNNING || planning);
 }
@@ -848,7 +848,7 @@ const HALT_COPY = {
 function renderHaltState() {
   const element = $('#halt-state');
   const planning = state.policy.planning;
-  element.textContent = planning ? 'Planning · testing safe routes' : HALT_COPY[state.policy.status]();
+  element.textContent = planning ? `Planning · ${state.policy.planningPhase || 'starting'}` : HALT_COPY[state.policy.status]();
   element.className = `halt-state ${planning ? 'planning' : state.policy.status}`;
   $('#run-policy').textContent = planning ? '■ Cancel solver' : state.policy.status === HALT.RUNNING ? '■ Halt policy' : 'Run demo policy';
   updatePolicyProgressBar();
@@ -924,15 +924,31 @@ function settlePolicy(status) {
   }
 }
 
-function runPolicyPlanning() {
-  if (!state.policy.planning) return;
-  state.policy.planning = false;
+const yieldForSolverFeedback = () => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+
+async function runPolicyPlanning(token) {
+  const isCurrent = () => state.policy.planning && token === state.policy.planningToken;
+  if (!isCurrent()) return;
   clearTimeout(state.policy.restart);
   state.policy.restart = null;
-  if (!replanArms()) { state.policy.status = HALT.SAFETY; renderHaltState(); return; }
+  state.policy.planningPhase = 'trying IK candidates';
+  renderHaltState();
+  await yieldForSolverFeedback();
+  if (!isCurrent()) return;
+  if (!replanArms()) {
+    state.policy.planning = false;
+    state.policy.planningPhase = null;
+    state.policy.status = HALT.SAFETY;
+    renderHaltState();
+    return;
+  }
 
   const poses = activeArms().map(({ q, arm }) => ({ q, arm }));
   let motion = null;
+  state.policy.planningPhase = 'checking collision-safe route';
+  renderHaltState();
+  await yieldForSolverFeedback();
+  if (!isCurrent()) return;
   if (state.currentWorkflow.id === 'fold' && activeArms().length === 2) {
     motion = planTowelFoldMotion(
       poses,
@@ -945,11 +961,28 @@ function runPolicyPlanning() {
       activeArms().map(({ plan }) => plan.q),
       compiled.environment.safety,
     );
-    // First find a route, then reduce it. The reducer resamples and validates
-    // every proposed shortcut, so fewer steps never means a looser envelope.
-    if (motion) motion = reduceSafeCellMotion(poses, motion.frames, compiled.environment.safety);
+    if (motion) {
+      state.policy.planningPhase = 'reducing verified route';
+      renderHaltState();
+      await yieldForSolverFeedback();
+      if (!isCurrent()) return;
+      // First find a route, then reduce it. The reducer resamples and
+      // validates every proposed shortcut, so fewer steps never means a
+      // looser envelope.
+      motion = reduceSafeCellMotion(poses, motion.frames, compiled.environment.safety);
+    }
   }
-  if (!motion) { state.safetyNotice = 'workspace'; state.policy.status = HALT.SAFETY; renderHaltState(); updateTelemetry(); return; }
+  if (!motion) {
+    state.policy.planning = false;
+    state.policy.planningPhase = null;
+    state.safetyNotice = 'workspace';
+    state.policy.status = HALT.SAFETY;
+    renderHaltState();
+    updateTelemetry();
+    return;
+  }
+  state.policy.planning = false;
+  state.policy.planningPhase = null;
   state.policy.path = motion.frames;
   state.policy.pathIndex = 0;
   state.policy.status = HALT.RUNNING;
@@ -982,7 +1015,7 @@ function startPolicy() {
   // work begins. The same token makes a pending solve safely cancellable.
   requestAnimationFrame(() => setTimeout(() => {
     if (!state.policy.planning || token !== state.policy.planningToken) return;
-    runPolicyPlanning();
+    runPolicyPlanning(token);
   }, 0));
 }
 
@@ -992,6 +1025,7 @@ function haltPolicy(status = HALT.OPERATOR, { silent = false } = {}) {
   state.policy.frame = null;
   state.policy.restart = null;
   state.policy.planning = false;
+  state.policy.planningPhase = null;
   state.policy.planningToken += 1;
   if (silent) { state.policy.status = HALT.IDLE; state.policy.steps = 0; }
   else state.policy.status = status;
