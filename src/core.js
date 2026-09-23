@@ -182,6 +182,31 @@ export function evaluateCellSafety(poses, safety = {}) {
  * fixed set of seed postures keeps the result reproducible after an operator
  * has moved the sliders, and a mirrored arm is solved in its reflected frame.
  */
+/**
+ * One cyclic-coordinate-descent sweep: rotate every joint, tip to base, to
+ * point the tool as directly as each joint's own axis allows toward `goal`.
+ * solveInverseKinematics loops this to convergence across many seeds; a
+ * single sweep is also cheap enough to run once per pointer-move frame, for
+ * an interactive live-drag follow (see liveDragStep) where a full multi-seed
+ * search would stall the drag.
+ */
+function ccdSweep(q, goal, arm) {
+  const next = [...q];
+  for (let joint = next.length - 1; joint >= 0; joint -= 1) {
+    const { points, axes } = forwardKinematics(next, arm);
+    const pivot = points[joint];
+    const axis = axes[joint];
+    const toTip = sub(points.at(-1), pivot);
+    const toGoal = sub(goal, pivot);
+    const flatTip = sub(toTip, [axis[0] * dot(axis, toTip), axis[1] * dot(axis, toTip), axis[2] * dot(axis, toTip)]);
+    const flatGoal = sub(toGoal, [axis[0] * dot(axis, toGoal), axis[1] * dot(axis, toGoal), axis[2] * dot(axis, toGoal)]);
+    if (norm(flatTip) < 1e-6 || norm(flatGoal) < 1e-6) continue;
+    const turn = Math.atan2(dot(cross(flatTip, flatGoal), axis), dot(flatTip, flatGoal));
+    next[joint] = clamp(next[joint] + clamp(turn, -0.25, 0.25), -limitOf(arm, joint), limitOf(arm, joint));
+  }
+  return next;
+}
+
 export function solveInverseKinematics(target, arm = ARM, safety = {}, otherPoses = []) {
   const solverArm = arm.mirror ? { ...arm, mirror: false } : arm;
   const goal = mirrorPoint(target, arm);
@@ -216,18 +241,7 @@ export function solveInverseKinematics(target, arm = ARM, safety = {}, otherPose
   for (const seed of seeds) {
     const q = seed.map((value, index) => clamp(value, -limitOf(solverArm, index), limitOf(solverArm, index)));
     for (let iteration = 0; iteration < 120; iteration += 1) {
-      for (let joint = q.length - 1; joint >= 0; joint -= 1) {
-        const { points, axes } = forwardKinematics(q, solverArm);
-        const pivot = points[joint];
-        const axis = axes[joint];
-        const toTip = sub(points.at(-1), pivot);
-        const toGoal = sub(goal, pivot);
-        const flatTip = sub(toTip, [axis[0] * dot(axis, toTip), axis[1] * dot(axis, toTip), axis[2] * dot(axis, toTip)]);
-        const flatGoal = sub(toGoal, [axis[0] * dot(axis, toGoal), axis[1] * dot(axis, toGoal), axis[2] * dot(axis, toGoal)]);
-        if (norm(flatTip) < 1e-6 || norm(flatGoal) < 1e-6) continue;
-        const turn = Math.atan2(dot(cross(flatTip, flatGoal), axis), dot(flatTip, flatGoal));
-        q[joint] = clamp(q[joint] + clamp(turn, -0.25, 0.25), -limitOf(solverArm, joint), limitOf(solverArm, joint));
-      }
+      q.splice(0, q.length, ...ccdSweep(q, goal, solverArm));
       if (distance(forwardKinematics(q, solverArm).points.at(-1), goal) < 0.5) break;
     }
     const candidate = { q, distance: distance(forwardKinematics(q, solverArm).points.at(-1), goal) };
@@ -240,6 +254,31 @@ export function solveInverseKinematics(target, arm = ARM, safety = {}, otherPose
   // the safety result to describe the real arm rather than the solver frame.
   selected.safety = evaluateCellSafety([...otherPoses, { q: selected.q, arm }], safety);
   return selected;
+}
+
+/**
+ * One interactive drag step toward `targetPoint`: a single CCD sweep (see
+ * ccdSweep — cheap enough for every pointer-move frame, unlike the
+ * multi-seed solveInverseKinematics search above), rate-capped exactly like
+ * guidedStep, and rejected outright — the arm holds its prior pose — if the
+ * resulting frame would violate floor/workspace/inter-arm safety. This is
+ * what lets an operator drag the tool itself around the scene, rather than
+ * only a goal marker the arm chases afterward, while recording transitions.
+ */
+export function liveDragStep(q, targetPoint, arm = ARM, safety = {}, otherPoses = []) {
+  const solverArm = arm.mirror ? { ...arm, mirror: false } : arm;
+  const goal = mirrorPoint(targetPoint, arm);
+  const swept = ccdSweep(q, goal, solverArm);
+  const next = swept.map((value, index) => clamp(
+    q[index] + clamp(value - q[index], -arm.maxActionDelta, arm.maxActionDelta),
+    -limitOf(arm, index),
+    limitOf(arm, index),
+  ));
+  const safetyResult = evaluateCellSafety([...otherPoses, { q: next, arm }], safety);
+  if (!safetyResult.safe) {
+    return { q: [...q], moved: false, safety: evaluateCellSafety([...otherPoses, { q, arm }], safety) };
+  }
+  return { q: next, moved: true, safety: safetyResult };
 }
 
 /** One safety-capped tracking update toward an already validated IK plan. */
@@ -354,6 +393,169 @@ export function planSafeCellMotion(poses, targets, safety = {}) {
 }
 
 /**
+ * Second-stage, collision-checked path reduction for a cell trajectory.
+ *
+ * The first planner deliberately favors finding a safe path. This reducer
+ * reruns the safety test over longer candidate edges and keeps a shortcut
+ * only when every resampled frame obeys the same joint-delta, floor,
+ * workspace, and inter-arm rules. `requiredFrameIndexes` preserve semantic
+ * stages such as a towel grasp, lift, and placement.
+ */
+export function reduceSafeCellMotion(poses, frames, safety = {}, { requiredFrameIndexes = [], keepTailFrames = 0 } = {}) {
+  if (!frames?.length) return { frames: [], sourceFrames: 0, reducedBy: 0 };
+  const arms = poses.map(({ arm = ARM }) => arm);
+  const validFrame = (frame) => evaluateCellSafety(frame.map((q, index) => ({ q, arm: arms[index] })), safety).safe;
+  const safeCellEdge = (from, to) => {
+    const steps = Math.max(1, ...to.map((q, armIndex) => Math.ceil(maxJointDistance(from[armIndex], q) / (arms[armIndex].maxActionDelta * 0.96))));
+    const samples = [];
+    for (let step = 1; step <= steps; step += 1) {
+      const frame = to.map((q, armIndex) => interpolateJoints(from[armIndex], q, step / steps));
+      if (!validFrame(frame)) return null;
+      samples.push(frame);
+    }
+    return samples;
+  };
+
+  const stops = new Set([frames.length - 1]);
+  requiredFrameIndexes.forEach((index) => { if (index >= 0 && index < frames.length) stops.add(index); });
+  for (let index = Math.max(0, frames.length - keepTailFrames); index < frames.length; index += 1) stops.add(index);
+  const endpoints = [...stops].sort((a, b) => a - b);
+  const reduced = [];
+  let sourceStart = -1;
+  let current = poses.map(({ q }) => [...q]);
+
+  for (const endpoint of endpoints) {
+    let cursor = sourceStart;
+    while (cursor < endpoint) {
+      let accepted = null;
+      let acceptedIndex = cursor + 1;
+      for (let candidate = endpoint; candidate > cursor; candidate -= 1) {
+        const shortcut = safeCellEdge(current, frames[candidate]);
+        if (!shortcut) continue;
+        accepted = shortcut;
+        acceptedIndex = candidate;
+        break;
+      }
+      // The original adjacent frame is guaranteed to be a valid fallback for
+      // planner output; keep it defensively if a caller supplied bad input.
+      if (!accepted) {
+        const fallback = frames[cursor + 1];
+        if (!validFrame(fallback)) return null;
+        accepted = [fallback.map((q) => [...q])];
+      }
+      reduced.push(...accepted.map((frame) => frame.map((q) => [...q])));
+      current = reduced.at(-1);
+      cursor = acceptedIndex;
+    }
+    sourceStart = endpoint;
+  }
+  return { frames: reduced, sourceFrames: frames.length, reducedBy: frames.length - reduced.length };
+}
+
+let cachedFoldPath = null;
+
+/**
+ * Specialized bimanual motion planner for the laundry folding demo (Task 07).
+ *
+ * Coordinates both arms through the teachable folding sequence:
+ *  1. Arm A & Arm B safely approach the towel corners (pin left, grasp right)
+ *  2. Arm A firmly pins the left edge to the table
+ *  3. Arm B lifts the right edge, arcs across the midline, and folds it over
+ *  4. Arm B lowers and places the folded edge near the pinned edge
+ *  5. Holds the fold while the physical cloth settles into rest
+ *
+ * Every frame is validated against floor, workspace, and inter-arm clearance limits.
+ */
+export function planTowelFoldMotion(poses, safety = {}, profile = {}) {
+  if (poses.length < 2) return null;
+  const armA = poses[0].arm || ARM;
+  const armB = poses[1].arm || ARM_B;
+
+  const goalA = [250, 180, 15];
+  const goalB = [400, 180, 15];
+  const planA = solveInverseKinematics(goalA, armA, safety);
+  const planB = solveInverseKinematics(goalB, armB, safety, [{ q: planA.q, arm: armA }]);
+
+  if (!planA?.safety?.safe || !planB?.safety?.safe) return null;
+
+  const isHomeA = jointDistance(poses[0].q, HOME_POSE) < 1e-3;
+  const isHomeB = jointDistance(poses[1].q, HOME_POSE) < 1e-3;
+
+  if (isHomeA && isHomeB && cachedFoldPath) {
+    return { frames: cachedFoldPath.map((f) => [[...f[0]], [...f[1]]]), planA, planB };
+  }
+
+  const frames = [];
+  const stageEnds = [];
+  const approach = planSafeCellMotion(poses, [planA.q, planB.q], safety);
+  if (!approach) return null;
+  for (const frame of approach.frames) frames.push([[...frame[0]], [...frame[1]]]);
+  stageEnds.push(frames.length - 1);
+
+  let curA = planA.q;
+  let curB = frames.length ? frames.at(-1)[1] : poses[1].q;
+  // Lift while Arm A pins, then retract Arm A before the folded edge crosses
+  // the pin. Keeping both tools at the fold line violates arm clearance and
+  // leaves the towel loose at x≈300 instead of placed on the pinned edge.
+  const liftHeight = profile.liftHeight ?? 45;
+  const crossHeight = profile.crossHeight ?? 38;
+  const placeHeight = profile.placeHeight ?? 6;
+  const settleFrames = profile.settleFrames ?? 4;
+  const liftWaypoint = [380, 180, liftHeight];
+  const liftPlan = solveInverseKinematics(liftWaypoint, armB, safety, [{ q: curA, arm: armA }]);
+  if (!liftPlan?.safety?.safe) return null;
+  const liftPath = planSafeMotion(curB, liftPlan.q, armB, safety, [{ q: curA, arm: armA }]);
+  if (!liftPath) return null;
+  for (const q of liftPath) frames.push([[...curA], [...q]]);
+  stageEnds.push(frames.length - 1);
+  curB = liftPath.at(-1);
+
+  const retract = planSafeCellMotion(
+    [{ q: curA, arm: armA }, { q: curB, arm: armB }],
+    [[...HOME_POSE], curB],
+    safety,
+  );
+  if (!retract) return null;
+  for (const frame of retract.frames) frames.push([[...frame[0]], [...frame[1]]]);
+  stageEnds.push(frames.length - 1);
+  curA = retract.frames.at(-1)[0];
+  curB = retract.frames.at(-1)[1];
+
+  const foldWaypoints = [
+    [310, 180, liftHeight],
+    [270, 180, crossHeight],
+    // Set the delivered edge just above the table (and its lower layer), not
+    // at a hovering tool height. The thickness barrier supplies the final
+    // separation between the two towel layers.
+    [250, 180, placeHeight],
+  ];
+  for (const wp of foldWaypoints) {
+    const planWp = solveInverseKinematics(wp, armB, safety, [{ q: curA, arm: armA }]);
+    if (!planWp?.safety?.safe) return null;
+    const path = planSafeMotion(curB, planWp.q, armB, safety, [{ q: curA, arm: armA }]);
+    if (!path) return null;
+    for (const q of path) {
+      frames.push([[...curA], [...q]]);
+    }
+    stageEnds.push(frames.length - 1);
+    curB = path.at(-1);
+  }
+
+  // A short settle phase lets the PBD cloth relax without exceeding the
+  // fold workflow's 400-step operating budget.
+  for (let h = 0; h < settleFrames; h += 1) {
+    frames.push([[...curA], [...curB]]);
+  }
+
+  // Unlike free-space reaches, the fold phases drive a dynamic cloth model.
+  // Keep their full rate-capped samples: reducing them makes the grasped edge
+  // move too abruptly and stretches the simulated fabric. Generic policies
+  // still receive the second-stage reducer in startPolicy().
+  if (isHomeA && isHomeB) cachedFoldPath = frames.map((f) => [[...f[0]], [...f[1]]]);
+  return { frames, sourceFrames: frames.length, reducedBy: 0, stageEnds, planA, planB };
+}
+
+/**
  * Clamp a goal into the table bounds, the height band, and the arm's reach shell.
  *
  * The shell has an inner wall as well as an outer one: an articulated arm
@@ -427,4 +629,26 @@ export function buildEpisodeArtifact({ environment, task, transitions, voice, ar
       audio_data_url: voice?.dataUrl || null,
     },
   };
+}
+
+/** Calculate 0-100 progress percentage for demo policy execution. */
+export function computePolicyProgress(steps, totalSteps) {
+  if (!totalSteps || totalSteps <= 0) return 0;
+  const clampedSteps = Math.max(0, steps || 0);
+  return Math.min(100, Math.round((clampedSteps / totalSteps) * 100));
+}
+
+/**
+ * Format a live solver progress ticker: step count, percent, and elapsed
+ * wall time. Every task runs the same demo planner (planSafeCellMotion, or
+ * planTowelFoldMotion for the bimanual fold), so this is task-agnostic by
+ * construction - there is nothing fold-specific to gate it behind.
+ */
+export function formatSolverTicker({ steps = 0, totalSteps = 0, elapsedMs = 0 } = {}) {
+  const safeTotal = Math.max(0, Math.round(totalSteps || 0));
+  if (safeTotal === 0) return 'Solver idle';
+  const safeSteps = clamp(Math.round(steps || 0), 0, safeTotal);
+  const pct = computePolicyProgress(safeSteps, safeTotal);
+  const seconds = Math.max(0, elapsedMs || 0) / 1000;
+  return `Solving · step ${safeSteps}/${safeTotal} · ${pct}% · ${seconds.toFixed(1)}s`;
 }

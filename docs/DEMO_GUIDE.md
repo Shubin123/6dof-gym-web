@@ -10,7 +10,13 @@ ArmLab is a browser-only simulation for checking task geometry, recording the in
 4. Use the joint sliders for manual poses. A proposed move is rejected if it would cross the floor, workspace edge, or the other arm's clearance zone.
 5. Select **Run demo policy** to follow a prevalidated geometric path. Select it again while it is running to halt safely. The status line always reports whether the run reached the goal, reached its step budget, met a safety boundary, or was stopped by the operator.
 
-Use **Step budget** to set the run limit from 1 to 400 steps. Each task initially selects its recommended horizon; Towel fold starts at 200. Increasing the budget lets a run continue longer, but never bypasses the safety checks.
+Use **Reset** for a full scenario reset: it restores home poses, both task goal cubes and their declared heights, Arm A as the active controller, the cloth/timeline state, and fresh collision-checked IK plans. It does not leave a manually dragged cube or scrubbed frame as the base-policy start state.
+
+Use **Step budget** to set the run limit from 1 to 400 steps. Each task initially selects its recommended horizon; Towel fold starts at 400 so its lift, release, cross-over, placement, and settle stages all complete. Increasing the budget lets a run continue longer, but never bypasses the safety checks.
+
+Before free-space motion begins, the planner uses two stages: it first finds a safe route, then a reducer retests longer shortcuts at the normal per-joint step cap. A shortcut is kept only if every resampled frame clears the floor, table boundary, and other arm. Towel fold keeps its full pin, lift, cross, placement, and cloth-settling frames because reducing the dynamic phases would stretch the cloth unrealistically.
+
+When a policy starts, the status line immediately changes through **trying IK candidates**, **checking collision-safe route**, and (for free-space tasks) **reducing verified route**. The progress bar animates while planning because no path length is known until a candidate has passed safety checks. Select **Cancel solver** to stop before any arm motion. Once planning succeeds, the bar becomes the exact control-step progress indicator.
 
 **Retry until goal** retries only after a step-budget halt, returning to the home pose for a fresh safe plan. It stops after a reached goal and never retries a safety halt. Scenario 07 turns it on by default.
 
@@ -38,7 +44,13 @@ The 3-D viewport is loaded only after selecting **3D**. It needs a browser with 
 
 **Towel fold**, **Table reset**, and **Safe handoff** use both arms. The **Arm A / Arm B** switch selects which joint sliders and Goal Z control operate. The planner evaluates both safe arm orders and maintains the configured inter-arm clearance throughout the path.
 
-Scenario 07, **Towel fold**, also labels its task-specific browser controller and displays a gripper-constrained spring cloth in 3-D. The towel falls to the table and only captures a corner when a tool reaches it; it is not animated by policy progress alone. The **Cloth frames** indicator retains and analyzes a rolling 120-frame mesh history, reporting which corners are held and whether the cloth has settled. This browser model does not include cloth self-collision, friction, or material-specific dynamics, so it is a useful interaction illustration rather than a physical-cloth claim. Real training needs demonstrations, observations, and an external training runtime.
+Scenario 07, **Towel fold**, displays a gripper-constrained spring cloth in 3-D and an outlined **FOLDED TARGET** in both views. The towel falls onto a frictional table, captures only when a tool reaches a corner, preserves layer thickness during cross-over, and records a rolling 120-frame mesh history for the loading slider. Arm A pins then releases its corner; that contact remains table-pinned while Arm B lifts, crosses, and lowers the opposite edge onto it. Both views consume the same control-rate cloth snapshots, so changing viewport cannot change the simulated fold.
+
+## Task-specific policy recipes
+
+`src/task-policies.js` is the extension point for a new use case. A recipe declares a label, a safe warm-start profile, and weighted intermediate rewards. Scenario 07 uses five stages: secure both corners, pin/release the left edge, cross the fold line, place on the target, and settle below the stretch threshold. The browser runs a deterministic synthetic cloth calibration before planning, but every generated frame still goes through IK, floor, workspace, inter-arm, and joint-step checks. It is a pseudo-training seam for task development—not a claim that the browser has trained a deployable neural policy.
+
+To add a task-specific policy, add its recipe and optional profile in `src/task-policies.js`, then route the task planner to consume that profile. This keeps task optimisation local: tune the relevant stage weights and motion parameters without weakening the shared safety envelope.
 
 ## Recording and replay
 

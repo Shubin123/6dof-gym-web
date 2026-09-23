@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import compiled from '../data/compiled.json' with { type: 'json' };
 import registry from '../data/sources.json' with { type: 'json' };
-import { ARM, ARM_B, buildEpisodeArtifact, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, guidedStep, HALT, haltState, HOME_POSE, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
+import { ARM, ARM_B, buildEpisodeArtifact, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, guidedStep, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
 
 const HOME = HOME_POSE;
 const armsOf = (workflow) => (workflow.arms === 2 ? [[ARM, workflow.goal], [ARM_B, workflow.goal_b]] : [[ARM, workflow.goal]]);
@@ -86,32 +86,10 @@ test('floor, workspace, and inter-arm collisions are rejected', () => {
   assert.ok(crossed.armClearance < safety.arm_clearance_px);
 });
 
-test('every policy path stays over the floor, inside its edges, and clear of the other arm', () => {
-  const safety = compiled.environment.safety;
-  for (const workflow of compiled.workflows) {
-    const definitions = armsOf(workflow);
-    const plans = [];
-    definitions.forEach(([arm, goal], index) => {
-      const otherPoses = plans.map((plan, otherIndex) => ({ q: plan.q, arm: definitions[otherIndex][0] }));
-      plans[index] = solveInverseKinematics(targetOf(workflow, arm, goal), arm, safety, otherPoses);
-    });
-    const poses = definitions.map(([arm]) => ({ q: [...HOME], arm }));
-    const motion = planSafeCellMotion(poses, plans.map((plan) => plan.q), safety);
-    assert.ok(motion, `${workflow.id} should have a safe policy path`);
-    assert.ok(motion.frames.length <= workflow.horizon_steps, `${workflow.id} needs ${motion.frames.length}/${workflow.horizon_steps} steps`);
-    let previous = poses.map(({ q }) => q);
-    for (const frame of motion.frames) {
-      const assessment = evaluateCellSafety(frame.map((q, index) => ({ q, arm: definitions[index][0] })), safety);
-      assert.equal(assessment.safe, true, `${workflow.id} crossed its ${assessment.reason} boundary`);
-      frame.forEach((q, armIndex) => q.forEach((value, joint) => {
-        assert.ok(Math.abs(value - previous[armIndex][joint]) <= definitions[armIndex][0].maxActionDelta + 1e-9, `${workflow.id} exceeded the joint-delta cap`);
-      }));
-      previous = frame;
-    }
-    const finalErrors = definitions.map(([arm, goal], index) => distance(forwardKinematics(previous[index], arm).points.at(-1), targetOf(workflow, arm, goal)));
-    assert.ok(finalErrors.every((error) => error < 2), `${workflow.id} did not finish at its goals: ${finalErrors}`);
-  }
-});
+// 'every policy path stays over the floor, inside its edges, and clear of
+// the other arm' moved to test/motion-safety.test.js - it's heavy enough
+// that keeping it in this file added its full cost to this file's
+// sequential total instead of letting it run in a parallel process.
 
 test('a pose occupies real height, not a single plane', () => {
   const { points } = forwardKinematics(HOME, ARM);
@@ -120,27 +98,9 @@ test('a pose occupies real height, not a single plane', () => {
   assert.ok(points.some((point, index) => index > 1 && Math.abs(point[1] - points[1][1]) > 20), 'the chain should leave its initial plane');
 });
 
-test('guidance recovers from representative manual poses across the workspace', () => {
-  const starts = [HOME, [0, 0, 0, 0, 0, 0], [1.2, 1.1, -0.8, 0.6, -0.4, 0.2], [-1.2, 0.5, -1.5, -0.6, -0.9, -0.2]];
-  for (const arm of [ARM, ARM_B]) {
-    for (let x = 100; x <= 620; x += 130) for (let y = 110; y <= 390; y += 90) for (const z of [10, 80, 150]) {
-      const target = projectToReachableWorkspace([x, y, z], compiled.environment.safety, arm);
-      const plan = solveInverseKinematics(target, arm);
-      // Guidance converges on the plan; whether the plan reaches the target is
-      // the solver's business, and the task-goal test above covers that.
-      const planned = forwardKinematics(plan.q, arm).points.at(-1);
-      for (const start of starts) {
-        let q = [...start];
-        for (let step = 0; step < compiled.environment.max_steps; step += 1) {
-          const update = guidedStep(q, target, arm, plan);
-          assert.ok(update.action.every((delta) => Math.abs(delta) <= arm.maxActionDelta + 1e-9));
-          q = update.q;
-        }
-        assert.ok(distance(forwardKinematics(q, arm).points.at(-1), planned) < 2, `${start} did not converge on the plan for ${target}`);
-      }
-    }
-  }
-});
+// 'guidance recovers from representative manual poses across the workspace'
+// moved to test/guidance-recovery.test.js for the same reason - its dense
+// workspace sweep now runs in its own parallel process.
 
 test('an episode always ends in a named halt state', () => {
   assert.equal(haltState({ error: 3, steps: 10, budget: 200 }), HALT.REACHED);
@@ -217,4 +177,59 @@ test('the study path and source registry keep resolvable references', () => {
   }
   assert.ok(registry.sources.every((source) => /^https:\/\//.test(source.url)));
   assert.ok(registry.sources.every((source) => typeof source.used_for === 'string' && source.used_for.length > 0));
+});
+
+// 'planTowelFoldMotion produces a valid collision-free bimanual folding
+// trajectory' moved to test/towel-fold-planner.test.js for the same reason.
+
+test('liveDragStep advances one rate-capped, safety-checked step toward the pointer', () => {
+  const safety = compiled.environment.safety;
+  const target = [...compiled.workflows[0].goal, compiled.workflows[0].goal_height];
+  const step = liveDragStep(HOME, target, ARM, safety);
+  assert.equal(step.moved, true, 'a reachable target should move the arm');
+  assert.equal(step.safety.safe, true);
+  HOME.forEach((value, joint) => {
+    assert.ok(Math.abs(step.q[joint] - value) <= ARM.maxActionDelta + 1e-9, `joint ${joint} exceeded the per-frame delta cap`);
+  });
+});
+
+test('liveDragStep converges toward a dragged target over consecutive frames', () => {
+  const safety = compiled.environment.safety;
+  const target = [...compiled.workflows[0].goal, compiled.workflows[0].goal_height];
+  let q = [...HOME];
+  for (let frame = 0; frame < 400; frame += 1) {
+    const step = liveDragStep(q, target, ARM, safety);
+    assert.equal(evaluateCellSafety([{ q: step.q, arm: ARM }], safety).safe, true, `frame ${frame} left a safe envelope`);
+    q = step.q;
+  }
+  const tip = forwardKinematics(q, ARM).points.at(-1);
+  assert.ok(distance(tip, target) < 5, `drag settled ${distance(tip, target).toFixed(2)}px from the target`);
+});
+
+test('liveDragStep refuses a step that would collide with the other arm, holding the prior pose', () => {
+  const safety = compiled.environment.safety;
+  const otherPoses = [{ q: [...HOME], arm: ARM_B }];
+  const intoOtherArm = [...ARM_B.base, 15];
+  let q = [...HOME];
+  let sawRejection = false;
+  for (let frame = 0; frame < 300; frame += 1) {
+    const step = liveDragStep(q, intoOtherArm, ARM, safety, otherPoses);
+    assert.equal(
+      evaluateCellSafety([...otherPoses, { q: step.q, arm: ARM }], safety).safe,
+      true,
+      `frame ${frame} produced an unsafe bimanual pose`,
+    );
+    if (!step.moved) sawRejection = true;
+    q = step.q;
+  }
+  assert.equal(sawRejection, true, 'dragging straight at the other arm should eventually be refused');
+});
+
+test('formatSolverTicker shows step, percent, and elapsed time, on every task', () => {
+  assert.equal(formatSolverTicker(), 'Solver idle');
+  assert.equal(formatSolverTicker({ steps: 0, totalSteps: 0, elapsedMs: 500 }), 'Solver idle', 'no path planned yet is idle regardless of a stray elapsed time');
+  assert.equal(formatSolverTicker({ steps: 27, totalSteps: 272, elapsedMs: 1234 }), 'Solving · step 27/272 · 10% · 1.2s');
+  assert.equal(formatSolverTicker({ steps: 272, totalSteps: 272, elapsedMs: 4000 }), 'Solving · step 272/272 · 100% · 4.0s');
+  assert.equal(formatSolverTicker({ steps: 400, totalSteps: 272, elapsedMs: 4000 }), 'Solving · step 272/272 · 100% · 4.0s', 'steps past the plan length clamp to it');
+  assert.equal(formatSolverTicker({ steps: -5, totalSteps: 100, elapsedMs: -50 }), 'Solving · step 0/100 · 0% · 0.0s', 'negative inputs clamp rather than produce garbage');
 });

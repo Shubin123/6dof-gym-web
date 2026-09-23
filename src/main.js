@@ -1,7 +1,9 @@
 import './styles.css';
 import compiled from '../data/compiled.json';
 import registry from '../data/sources.json';
-import { ARM, ARM_B, buildEpisodeArtifact, clamp, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, projectToReachableWorkspace, solveInverseKinematics } from './core.js';
+import { ARM, ARM_B, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, reduceSafeCellMotion, solveInverseKinematics } from './core.js';
+import { ClothSimulator } from './cloth.js';
+import { bootstrapPolicy, policyRecipeFor, scoreTaskStages } from './task-policies.js';
 
 const $ = (selector) => document.querySelector(selector);
 const fmt = (value, digits = 2) => Number(value).toFixed(digits);
@@ -30,9 +32,16 @@ const state = {
   replaying: false,
   familyFilter: 'all',
   modelFilter: 'all',
-  policy: { status: HALT.IDLE, steps: 0, speed: 1, budget: compiled.workflows[0].horizon_steps, loop: false, frame: null, accumulator: 0, restart: null, path: null, pathIndex: 0 },
+  policy: { status: HALT.IDLE, steps: 0, speed: 1, budget: compiled.workflows[0].horizon_steps, loop: false, frame: null, accumulator: 0, restart: null, path: null, pathIndex: 0, solveStartedAt: null, planning: false, planningToken: 0, planningPhase: null, stageScore: null },
   safetyNotice: null,
   voice: { dataUrl: null, mimeType: null, transcript: '', audioUrl: null, recorder: null, recognition: null, stream: null, bytes: 0, captureTimeout: null },
+  frameHistory: [],
+  // Must match the 3D viewport's cloth grid (src/viewport3d.js makeCloth) —
+  // frame history stores whichever simulator's snapshot was available, and
+  // restore() does a raw Float32Array.set() into this instance, so a size
+  // mismatch throws when scrubbing the timeline.
+  cloth2d: new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2 }),
+  timeline: { currentStep: 0, totalSteps: 0, scrubbing: false },
 };
 
 const activeArms = () => state.arms.slice(0, state.armCount);
@@ -236,10 +245,10 @@ function replayEpisode() {
       armState.lastAction = transition.action_after_safety_clamp.slice(armIndex * 7, armIndex * 7 + 6);
     });
     state.step = transition.index;
-    syncSliders(); updateArms();
+    syncSliders(); updateArms(); updateTimelineSlider();
     index += 1;
     if (index < state.transitions.length) setTimeout(run, 1000 / compiled.environment.control_hz / state.policy.speed);
-    else { state.replaying = false; $('#replay').textContent = '↻ Replay episode'; }
+    else { state.replaying = false; $('#replay').textContent = '↻ Replay episode'; updateTimelineSlider(); }
   };
   if (state.voice.dataUrl) new Audio(state.voice.dataUrl).play().catch(() => {});
   run();
@@ -264,6 +273,7 @@ function importEpisode(file) {
       $('#download').disabled = false;
       $('#replay').disabled = !state.transitions.length;
       setVoiceStatus(state.voice.dataUrl ? 'Episode imported · audio ready to replay' : 'Episode imported · no audio attached');
+      updateTimelineSlider();
     } catch {
       setVoiceStatus('Could not import that episode file', true);
     }
@@ -300,8 +310,179 @@ function updateArms() {
     group.querySelector('.gripper').innerHTML = `<path class="grip" d="M${x} ${y} l${Math.cos(heading + spread) * 19} ${Math.sin(heading + spread) * 19} M${x} ${y} l${Math.cos(heading - spread) * 19} ${Math.sin(heading - spread) * 19}"/>`;
   });
   updateGoals();
+  updateCloth2D();
   pushViewportState();
   updateTelemetry();
+}
+
+function updateCloth2D() {
+  const clothGroup = $('#cloth-2d');
+  if (!clothGroup) return;
+  const isFold = state.currentWorkflow.id === 'fold';
+  setHidden(clothGroup, !isFold);
+  if (!isFold) return;
+
+  const { basePoints, creasePoints } = state.cloth2d.get2DPolygons([325, 240], 100);
+  const pathString = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0], 1)} ${fmt(p[1], 1)}`).join(' ') + ' Z';
+  const creaseString = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0], 1)} ${fmt(p[1], 1)}`).join(' ');
+
+  clothGroup.innerHTML = `
+    <rect class="cloth-2d-target" x="250" y="180" width="75" height="120" rx="3" />
+    <text class="cloth-2d-target-label" x="287.5" y="318" text-anchor="middle">FOLDED TARGET</text>
+    <path class="cloth-2d-base" d="${pathString(basePoints)}" />
+    <path class="cloth-2d-crease" d="${creaseString(creasePoints)}" />
+    <circle class="cloth-2d-pin" cx="${fmt(basePoints[0][0], 1)}" cy="${fmt(basePoints[0][1], 1)}" r="4" />
+  `;
+}
+
+/**
+ * The cloth advances only with an accepted control frame. This is deliberately
+ * outside either renderer: 2-D and 3-D therefore display the same buffered
+ * physical state rather than integrating separate, refresh-rate-dependent
+ * towels.
+ */
+function advanceClothPhysics() {
+  if (state.currentWorkflow.id !== 'fold') return;
+  const targets = activeArms().map((armState) => {
+    const tip = tipOf(armState);
+    return { x: (tip[0] - 325) / 100, y: (tip[1] - 240) / 100, z: tip[2] / 100 };
+  });
+  // Two fixed PBD substeps per 25 Hz command give constraints time to settle
+  // between waypoints without making rendering cadence part of the dynamics.
+  for (let substep = 0; substep < 2; substep += 1) {
+    state.cloth2d.step({ targetA: targets[0], targetB: targets[1] });
+  }
+  const metrics = state.cloth2d.getFoldMetrics();
+  state.policy.stageScore = scoreTaskStages(state.currentWorkflow, { cloth: state.cloth2d, tips: activeArms().map(tipOf) });
+  const held = state.cloth2d.captured.map((value, index) => `${index ? 'B' : 'A'} ${value ? 'held' : 'free'}`).join(' · ');
+  $('#cloth-status').textContent = `Cloth frames ${state.cloth2d.history.length} / 120 · ${held} · ${state.policy.stageScore.stage} ${Math.round(state.policy.stageScore.reward * 100)}% · fold: ${fmt(metrics.frontDistance * 10, 1)} cm${metrics.folded ? ' · folded' : ''}`;
+}
+
+function updateTimelineSlider() {
+  const slider = $('#loading-sliderbar');
+  const status = $('#loading-sliderbar-status');
+  const progress = $('#loading-sliderbar-progress');
+  const mode = $('#loading-sliderbar-mode');
+  if (!slider) return;
+
+  const total = Math.max(
+    state.policy.path?.length || 0,
+    state.frameHistory.length ? state.frameHistory.length - 1 : 0,
+    state.transitions.length ? state.transitions.length - 1 : 0,
+    1,
+  );
+  const current = clamp(
+    state.timeline.scrubbing ? state.timeline.currentStep : (state.policy.steps || state.step || 0),
+    0,
+    total,
+  );
+
+  slider.min = '0';
+  slider.max = String(total);
+  slider.value = String(current);
+
+  const pct = Math.round((current / total) * 100);
+  if (progress) progress.style.width = `${pct}%`;
+  if (status) status.textContent = `Step ${current} / ${total} (${pct}%)`;
+  if (mode) {
+    if (state.policy.status === HALT.RUNNING) mode.textContent = 'RUNNING';
+    else if (state.replaying) mode.textContent = 'REPLAY';
+    else if (state.timeline.scrubbing) mode.textContent = 'SCRUB';
+    else mode.textContent = 'READY';
+  }
+  updatePolicyProgressBar();
+}
+
+function updatePolicyProgressBar() {
+  const wrap = $('#policy-progress-wrap');
+  const fill = $('#policy-progress-fill');
+  const label = $('#policy-progress-label');
+  if (!fill) return;
+
+  const total = state.policy.path?.length || policyBudget();
+  const current = state.policy.steps || 0;
+  const planning = state.policy.planning;
+  const pct = planning ? 18 : computePolicyProgress(current, total);
+
+  fill.style.width = `${pct}%`;
+  if (label) label.textContent = planning ? 'search' : `${pct}%`;
+  if (wrap) {
+    wrap.setAttribute('aria-valuenow', String(pct));
+    wrap.setAttribute('aria-busy', String(planning));
+    wrap.classList.toggle('running', state.policy.status === HALT.RUNNING);
+    wrap.classList.toggle('planning', planning);
+    wrap.classList.toggle('reached', state.policy.status === HALT.REACHED);
+  }
+  updateSolverTicker();
+}
+
+/**
+ * Live solver progress ticker, shown for every task - not just the
+ * bimanual fold - since every task runs the same demo planner underneath.
+ * Ticks on its own interval (below) so the elapsed time keeps advancing
+ * between discrete policy steps, the same way the sim-time clock does.
+ */
+function updateSolverTicker() {
+  const el = $('#solver-ticker');
+  if (!el) return;
+  const planning = state.policy.planning;
+  const total = state.policy.path?.length || (state.policy.status === HALT.RUNNING ? policyBudget() : 0);
+  const elapsedMs = state.policy.solveStartedAt !== null ? performance.now() - state.policy.solveStartedAt : 0;
+  el.textContent = planning
+    ? `Planning · ${state.policy.planningPhase || 'starting'} · ${(elapsedMs / 1000).toFixed(1)}s`
+    : formatSolverTicker({ steps: state.policy.steps, totalSteps: total, elapsedMs });
+  el.classList.toggle('running', state.policy.status === HALT.RUNNING || planning);
+}
+
+function loadSimulationStep(stepIndex) {
+  state.timeline.scrubbing = true;
+  state.timeline.currentStep = stepIndex;
+
+  if (state.policy.status === HALT.RUNNING) {
+    haltPolicy(HALT.OPERATOR);
+  }
+
+  const historyEntry = state.frameHistory[stepIndex];
+  if (historyEntry) {
+    activeArms().forEach((armState, armIndex) => {
+      if (historyEntry.arms?.[armIndex]) {
+        armState.q = [...historyEntry.arms[armIndex].q];
+        armState.goal = [...historyEntry.arms[armIndex].goal];
+        armState.lastAction = [...historyEntry.arms[armIndex].lastAction];
+      }
+    });
+    state.step = historyEntry.step ?? stepIndex;
+    state.policy.steps = stepIndex;
+    if (historyEntry.clothSnapshot) {
+      viewport.instance?.restoreCloth?.(historyEntry.clothSnapshot);
+      state.cloth2d?.restore?.(historyEntry.clothSnapshot);
+    }
+  } else if (state.policy.path?.[stepIndex]) {
+    const frame = state.policy.path[stepIndex];
+    activeArms().forEach((armState, index) => {
+      if (frame[index]) {
+        armState.q = [...frame[index]];
+      }
+    });
+    state.step = stepIndex;
+    state.policy.steps = stepIndex;
+  } else if (state.transitions[stepIndex]) {
+    const transition = state.transitions[stepIndex];
+    activeArms().forEach((armState, armIndex) => {
+      const block = transition.observation.slice(armIndex * 22, armIndex * 22 + 22);
+      if (block.length >= 22) {
+        armState.q = block.slice(0, 6);
+        armState.goal = block.slice(19, 22);
+        armState.lastAction = transition.action_after_safety_clamp.slice(armIndex * 7, armIndex * 7 + 6);
+      }
+    });
+    state.step = transition.index;
+    state.policy.steps = stepIndex;
+  }
+
+  syncSliders();
+  updateArms();
+  updateTimelineSlider();
 }
 
 function updateGoals() {
@@ -331,6 +512,7 @@ function pushViewportState() {
     })),
     taskId: state.currentWorkflow.id,
     policyProgress: state.policy.path?.length ? state.policy.pathIndex / state.policy.path.length : 0,
+    clothSnapshot: state.cloth2d.snapshot(),
   });
 }
 
@@ -475,10 +657,6 @@ async function mountViewport3D() {
       workspace: compiled.environment.safety,
       onGoalPick: (point) => setGoalFromScene(point),
       onGoalHeight: setGoalHeight,
-      onClothFrame: ({ frames, captured, settled }) => {
-        if (state.currentWorkflow.id !== 'fold') return;
-        $('#cloth-status').textContent = `Cloth frames ${frames} / 120 · ${captured.map((value, index) => `${index ? 'B' : 'A'} ${value ? 'held' : 'free'}`).join(' · ')}${settled ? ' · settled' : ''}`;
-      },
     });
     viewport.instance = instance;
     pushViewportState();
@@ -504,20 +682,47 @@ async function setViewportMode(mode) {
     viewport.instance?.stop();
     setHidden($('#stage-3d'), true);
     setHidden($('#scene'), false);
+    setHidden($('#viewport-loader'), true);
     $('#viewport-hint').textContent = 'Click anywhere in the scene to move the goal.';
     return;
   }
 
+  const loader = $('#viewport-loader');
+  const loaderFill = $('#viewport-loader-fill');
+  const loaderPercent = $('#viewport-loader-percent');
+  const loaderStep = $('#viewport-loader-step');
+
+  const setLoaderProgress = (percent, text) => {
+    if (loader) setHidden(loader, false);
+    if (loaderFill) loaderFill.style.width = `${percent}%`;
+    if (loaderPercent) loaderPercent.textContent = `${percent}%`;
+    if (loaderStep) loaderStep.textContent = text;
+  };
+
+  setLoaderProgress(15, 'Loading Three.js graphics engine…');
   $('#viewport-hint').textContent = 'Loading the 3-D viewport…';
+
   try {
+    setLoaderProgress(40, 'Building spatial kinematics & workcell…');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    setLoaderProgress(70, 'Initializing Position-Based Dynamics cloth physics…');
     const instance = await mountViewport3D();
+    setLoaderProgress(95, 'Compiling WebGL shaders & lighting…');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    setLoaderProgress(100, 'Ready');
+
     viewport.mode = '3d';
     setHidden($('#scene'), true);
     setHidden($('#stage-3d'), false);
+    setTimeout(() => {
+      if (loader) setHidden(loader, true);
+    }, 200);
+
     instance.start();
     pushViewportState();
     $('#viewport-hint').textContent = 'Drag to orbit · scroll to zoom · click the floor to move a goal · drag a cube up or down to change its height.';
   } catch (error) {
+    if (loader) setHidden(loader, true);
     viewport.failed = true;
     $('#view-2d').classList.add('active');
     $('#view-3d').classList.remove('active');
@@ -602,14 +807,20 @@ function loadWorkflow(id, { scroll = false } = {}) {
   state.policy.path = null;
   state.policy.pathIndex = 0;
   state.policy.accumulator = 0;
-  state.policy.budget = workflow.horizon_steps;
+  state.policy.budget = workflow.id === 'fold' ? 400 : workflow.horizon_steps;
   state.policy.loop = workflow.id === 'fold';
   $('#policy-loop').checked = state.policy.loop;
   $('#policy-budget').value = state.policy.budget;
   $('#policy-budget-value').textContent = state.policy.budget;
-  $('#policy-profile').textContent = workflow.id === 'fold' ? 'Towel-fold specialist' : 'Geometric policy';
+  $('#policy-profile').textContent = policyRecipeFor(workflow).label;
   setHidden($('#cloth-status'), workflow.id !== 'fold');
   $('#cloth-status').textContent = 'Cloth frames 0 / 120';
+  state.cloth2d?.reset();
+  viewport.instance?.resetCloth?.();
+  state.frameHistory = [];
+  state.timeline.currentStep = 0;
+  state.timeline.scrubbing = false;
+  updateTimelineSlider();
   setArmGoal(state.arms[0], [...workflow.goal, workflow.goal_height], { replan: false });
   setArmGoal(state.arms[1], [...(workflow.goal_b || workflow.goal), workflow.goal_height], { replan: false });
   replanArms();
@@ -642,9 +853,11 @@ const HALT_COPY = {
 
 function renderHaltState() {
   const element = $('#halt-state');
-  element.textContent = HALT_COPY[state.policy.status]();
-  element.className = `halt-state ${state.policy.status}`;
-  $('#run-policy').textContent = state.policy.status === HALT.RUNNING ? '■ Halt policy' : 'Run demo policy';
+  const planning = state.policy.planning;
+  element.textContent = planning ? `Planning · ${state.policy.planningPhase || 'starting'}` : HALT_COPY[state.policy.status]();
+  element.className = `halt-state ${planning ? 'planning' : state.policy.status}`;
+  $('#run-policy').textContent = planning ? '■ Cancel solver' : state.policy.status === HALT.RUNNING ? '■ Halt policy' : 'Run demo policy';
+  updatePolicyProgressBar();
 }
 
 /** Advance one prevalidated floor- and collision-safe control frame. */
@@ -670,8 +883,19 @@ function policyStep() {
   state.step += 1;
   state.policy.steps += 1;
   syncSliders();
+  advanceClothPhysics();
   updateArms();
   addTransition();
+
+  const clothSnap = state.cloth2d.snapshot();
+  state.frameHistory[state.policy.steps] = {
+    step: state.step,
+    arms: activeArms().map((a) => ({ q: [...a.q], goal: [...a.goal], lastAction: [...a.lastAction] })),
+    clothSnapshot: clothSnap,
+  };
+  updateTimelineSlider();
+
+  if (state.currentWorkflow.id === 'fold' && state.policy.stageScore?.complete) return HALT.REACHED;
   return haltState({ error, steps: state.policy.steps, budget: policyBudget() });
 }
 
@@ -708,24 +932,105 @@ function settlePolicy(status) {
   }
 }
 
-function startPolicy() {
-  if (state.policy.status === HALT.RUNNING) return;
+const yieldForSolverFeedback = () => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+
+async function runPolicyPlanning(token) {
+  const isCurrent = () => state.policy.planning && token === state.policy.planningToken;
+  if (!isCurrent()) return;
   clearTimeout(state.policy.restart);
   state.policy.restart = null;
-  if (!replanArms()) { state.policy.status = HALT.SAFETY; renderHaltState(); return; }
-  const motion = planSafeCellMotion(
-    activeArms().map(({ q, arm }) => ({ q, arm })),
-    activeArms().map(({ plan }) => plan.q),
-    compiled.environment.safety,
-  );
-  if (!motion) { state.safetyNotice = 'workspace'; state.policy.status = HALT.SAFETY; renderHaltState(); updateTelemetry(); return; }
+  state.policy.planningPhase = 'trying IK candidates';
+  renderHaltState();
+  await yieldForSolverFeedback();
+  if (!isCurrent()) return;
+  if (!replanArms()) {
+    state.policy.planning = false;
+    state.policy.planningPhase = null;
+    state.policy.status = HALT.SAFETY;
+    renderHaltState();
+    return;
+  }
+
+  const poses = activeArms().map(({ q, arm }) => ({ q, arm }));
+  let motion = null;
+  state.policy.planningPhase = 'checking collision-safe route';
+  renderHaltState();
+  await yieldForSolverFeedback();
+  if (!isCurrent()) return;
+  if (state.currentWorkflow.id === 'fold' && activeArms().length === 2) {
+    state.policy.planningPhase = 'calibrating cloth-aware policy';
+    renderHaltState();
+    await yieldForSolverFeedback();
+    if (!isCurrent()) return;
+    const warmStart = bootstrapPolicy(state.currentWorkflow);
+    motion = planTowelFoldMotion(
+      poses,
+      compiled.environment.safety,
+      warmStart.profile,
+    );
+  }
+  if (!motion) {
+    motion = planSafeCellMotion(
+      poses,
+      activeArms().map(({ plan }) => plan.q),
+      compiled.environment.safety,
+    );
+    if (motion) {
+      state.policy.planningPhase = 'reducing verified route';
+      renderHaltState();
+      await yieldForSolverFeedback();
+      if (!isCurrent()) return;
+      // First find a route, then reduce it. The reducer resamples and
+      // validates every proposed shortcut, so fewer steps never means a
+      // looser envelope.
+      motion = reduceSafeCellMotion(poses, motion.frames, compiled.environment.safety);
+    }
+  }
+  if (!motion) {
+    state.policy.planning = false;
+    state.policy.planningPhase = null;
+    state.safetyNotice = 'workspace';
+    state.policy.status = HALT.SAFETY;
+    renderHaltState();
+    updateTelemetry();
+    return;
+  }
+  state.policy.planning = false;
+  state.policy.planningPhase = null;
   state.policy.path = motion.frames;
   state.policy.pathIndex = 0;
   state.policy.status = HALT.RUNNING;
   state.policy.steps = 0;
   state.policy.accumulator = 0;
+  state.policy.solveStartedAt = performance.now();
+  state.timeline.scrubbing = false;
+
+  const clothSnap = state.cloth2d.snapshot();
+  state.frameHistory = [{
+    step: state.step,
+    arms: activeArms().map((a) => ({ q: [...a.q], goal: [...a.goal], lastAction: [...a.lastAction] })),
+    clothSnapshot: clothSnap,
+  }];
+
   renderHaltState();
+  updateTimelineSlider();
   state.policy.frame = requestAnimationFrame(policyFrame);
+}
+
+function startPolicy() {
+  if (state.policy.status === HALT.RUNNING || state.policy.planning) return;
+  clearTimeout(state.policy.restart);
+  state.policy.restart = null;
+  state.policy.planning = true;
+  state.policy.solveStartedAt = performance.now();
+  const token = ++state.policy.planningToken;
+  renderHaltState();
+  // Yield once so the operator sees feedback before the synchronous IK/RRT
+  // work begins. The same token makes a pending solve safely cancellable.
+  requestAnimationFrame(() => setTimeout(() => {
+    if (!state.policy.planning || token !== state.policy.planningToken) return;
+    runPolicyPlanning(token);
+  }, 0));
 }
 
 function haltPolicy(status = HALT.OPERATOR, { silent = false } = {}) {
@@ -733,30 +1038,116 @@ function haltPolicy(status = HALT.OPERATOR, { silent = false } = {}) {
   clearTimeout(state.policy.restart);
   state.policy.frame = null;
   state.policy.restart = null;
+  state.policy.planning = false;
+  state.policy.planningPhase = null;
+  state.policy.planningToken += 1;
   if (silent) { state.policy.status = HALT.IDLE; state.policy.steps = 0; }
   else state.policy.status = status;
   renderHaltState();
 }
 
 function resetArms() {
+  const workflow = state.currentWorkflow;
   for (const armState of state.arms) {
     armState.q = [...HOME_POSE];
     armState.lastAction = Array(6).fill(0);
   }
+  // A full reset returns the entire task contract to its loaded state, not
+  // merely the joints. This puts both goal cubes back at their scenario
+  // locations/heights before the solver is asked to make a fresh safe plan.
+  setArmGoal(state.arms[0], [...workflow.goal, workflow.goal_height], { replan: false });
+  setArmGoal(state.arms[1], [...(workflow.goal_b || workflow.goal), workflow.goal_height], { replan: false });
+  state.activeArm = 0;
+  replanArms();
   state.step = 0;
   state.safetyNotice = null;
   state.policy.path = null;
   state.policy.pathIndex = 0;
   state.policy.accumulator = 0;
+  state.policy.steps = 0;
+  state.policy.solveStartedAt = null;
+  state.frameHistory = [];
+  state.timeline.currentStep = 0;
+  state.timeline.scrubbing = false;
+  state.cloth2d?.reset();
+  viewport.instance?.resetCloth?.();
+  // The sim-time readout and any pending voice auto-stop are timers, not
+  // policy/episode state, and neither was touched here — the clock kept
+  // counting from page load and a running capture kept its own countdown
+  // across a reset.
+  state.startedAt = performance.now();
+  if (state.voice.captureTimeout) {
+    clearTimeout(state.voice.captureTimeout);
+    state.voice.captureTimeout = null;
+  }
+  [...$('#arm-switch').children].forEach((chip, index) => chip.classList.toggle('active', index === state.activeArm));
   syncSliders();
   updateArms();
+  updateTimelineSlider();
+  updateSolverTicker();
+}
+
+/**
+ * Drag-to-record the arm in the 2-D scene.
+ *
+ * A plain click keeps the original behavior (set a full goal, let
+ * replanArms find a plan). Once the pointer actually moves past a small
+ * threshold it becomes a live drag instead: each frame takes one
+ * liveDragStep toward the pointer — rate-capped and rejected outright by
+ * the same floor/workspace/inter-arm envelope as everything else — and,
+ * while `state.recording` is on, records a transition per frame, exactly
+ * like nudging a joint slider but by dragging the tool itself.
+ */
+let sceneDrag = null;
+
+function scenePointFromEvent(event) {
+  const rect = event.currentTarget.getBoundingClientRect();
+  return [(event.clientX - rect.left) / rect.width * 760, (event.clientY - rect.top) / rect.height * 490];
+}
+
+function onSceneDragMove(event) {
+  if (!sceneDrag) return;
+  if (!sceneDrag.dragging) {
+    if (Math.hypot(event.clientX - sceneDrag.pressedAt.x, event.clientY - sceneDrag.pressedAt.y) < 6) return;
+    sceneDrag.dragging = true;
+  }
+  const [x, y] = scenePointFromEvent(event);
+  const { armState } = sceneDrag;
+  const otherPoses = activeArms().filter((candidate) => candidate !== armState).map(({ q, arm }) => ({ q, arm }));
+  const previous = armState.q;
+  const step = liveDragStep(previous, [x, y, armState.goal[2]], armState.arm, compiled.environment.safety, otherPoses);
+  state.safetyNotice = step.safety.safe ? null : step.safety.reason;
+  if (!step.moved) { updateTelemetry(); return; }
+  armState.q = step.q;
+  armState.lastAction = step.q.map((value, index) => value - previous[index]);
+  armState.goal = projectToReachableWorkspace([x, y, armState.goal[2]], compiled.environment.safety, armState.arm);
+  state.step += 1;
+  syncSliders();
+  updateArms();
+  addTransition();
+}
+
+function endSceneDrag(event) {
+  if (!sceneDrag) return;
+  const { dragging } = sceneDrag;
+  sceneDrag = null;
+  if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  if (dragging) { replanArms(); syncSliders(); return; }
+  // No movement past the threshold: treat it as the original click-to-set-goal.
+  setGoalFromScene(scenePointFromEvent(event));
 }
 
 function installListeners() {
   $('#scene').addEventListener('pointerdown', (event) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    setGoalFromScene([(event.clientX - rect.left) / rect.width * 760, (event.clientY - rect.top) / rect.height * 490]);
+    const point = scenePointFromEvent(event);
+    const arm = nearestArm(point, activeArms().map((armState) => armState.arm));
+    const armState = state.arms.find((candidate) => candidate.arm.id === arm.id);
+    sceneDrag = { armState, pressedAt: { x: event.clientX, y: event.clientY }, dragging: false };
+    event.currentTarget.setPointerCapture(event.pointerId);
   });
+  $('#scene').addEventListener('pointermove', onSceneDragMove);
+  $('#scene').addEventListener('pointerup', endSceneDrag);
+  $('#scene').addEventListener('pointercancel', endSceneDrag);
   $('#view-2d').addEventListener('click', () => setViewportMode('2d'));
   $('#view-3d').addEventListener('click', () => setViewportMode('3d'));
   $('#scenario').addEventListener('change', (event) => loadWorkflow(event.target.value));
@@ -789,7 +1180,7 @@ function installListeners() {
     renderModels();
   });
   $('#run-policy').addEventListener('click', () => {
-    if (state.policy.status === HALT.RUNNING) haltPolicy(HALT.OPERATOR);
+    if (state.policy.status === HALT.RUNNING || state.policy.planning) haltPolicy(HALT.OPERATOR);
     else startPolicy();
   });
   $('#policy-speed').addEventListener('input', (event) => {
@@ -805,6 +1196,17 @@ function installListeners() {
     if (!state.policy.loop) { clearTimeout(state.policy.restart); state.policy.restart = null; }
     else if (state.policy.status === HALT.BUDGET) settlePolicy(HALT.BUDGET);
   });
+  const timelineSlider = $('#loading-sliderbar');
+  if (timelineSlider) {
+    timelineSlider.addEventListener('input', (event) => {
+      loadSimulationStep(Number(event.target.value));
+    });
+    timelineSlider.addEventListener('change', (event) => {
+      loadSimulationStep(Number(event.target.value));
+      state.timeline.scrubbing = false;
+      updateTimelineSlider();
+    });
+  }
   $('#reset').addEventListener('click', () => { haltPolicy(HALT.IDLE, { silent: true }); resetArms(); });
   $('#record').addEventListener('click', () => {
     if (state.recording) { stopRecording(); return; }
@@ -877,3 +1279,4 @@ renderScenarioSelect(); renderFamilyFilters(); renderModels(); renderDatasets();
 loadWorkflow(compiled.workflows[0].id);
 renderHaltState();
 setInterval(() => { $('#sim-time').textContent = `T + ${fmt((performance.now() - state.startedAt) / 1000, 1).padStart(4, '0')} s`; }, 100);
+setInterval(updateSolverTicker, 100);
