@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import compiled from '../data/compiled.json' with { type: 'json' };
 import registry from '../data/sources.json' with { type: 'json' };
-import { ARM, ARM_B, buildEpisodeArtifact, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, guidedStep, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
+import { ARM, ARM_B, buildEpisodeArtifact, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, guidedStep, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
 
 const HOME = HOME_POSE;
 const armsOf = (workflow) => (workflow.arms === 2 ? [[ARM, workflow.goal], [ARM_B, workflow.goal_b]] : [[ARM, workflow.goal]]);
@@ -86,32 +86,10 @@ test('floor, workspace, and inter-arm collisions are rejected', () => {
   assert.ok(crossed.armClearance < safety.arm_clearance_px);
 });
 
-test('every policy path stays over the floor, inside its edges, and clear of the other arm', () => {
-  const safety = compiled.environment.safety;
-  for (const workflow of compiled.workflows) {
-    const definitions = armsOf(workflow);
-    const plans = [];
-    definitions.forEach(([arm, goal], index) => {
-      const otherPoses = plans.map((plan, otherIndex) => ({ q: plan.q, arm: definitions[otherIndex][0] }));
-      plans[index] = solveInverseKinematics(targetOf(workflow, arm, goal), arm, safety, otherPoses);
-    });
-    const poses = definitions.map(([arm]) => ({ q: [...HOME], arm }));
-    const motion = planSafeCellMotion(poses, plans.map((plan) => plan.q), safety);
-    assert.ok(motion, `${workflow.id} should have a safe policy path`);
-    assert.ok(motion.frames.length <= workflow.horizon_steps, `${workflow.id} needs ${motion.frames.length}/${workflow.horizon_steps} steps`);
-    let previous = poses.map(({ q }) => q);
-    for (const frame of motion.frames) {
-      const assessment = evaluateCellSafety(frame.map((q, index) => ({ q, arm: definitions[index][0] })), safety);
-      assert.equal(assessment.safe, true, `${workflow.id} crossed its ${assessment.reason} boundary`);
-      frame.forEach((q, armIndex) => q.forEach((value, joint) => {
-        assert.ok(Math.abs(value - previous[armIndex][joint]) <= definitions[armIndex][0].maxActionDelta + 1e-9, `${workflow.id} exceeded the joint-delta cap`);
-      }));
-      previous = frame;
-    }
-    const finalErrors = definitions.map(([arm, goal], index) => distance(forwardKinematics(previous[index], arm).points.at(-1), targetOf(workflow, arm, goal)));
-    assert.ok(finalErrors.every((error) => error < 2), `${workflow.id} did not finish at its goals: ${finalErrors}`);
-  }
-});
+// 'every policy path stays over the floor, inside its edges, and clear of
+// the other arm' moved to test/motion-safety.test.js - it's heavy enough
+// that keeping it in this file added its full cost to this file's
+// sequential total instead of letting it run in a parallel process.
 
 test('a pose occupies real height, not a single plane', () => {
   const { points } = forwardKinematics(HOME, ARM);
@@ -120,27 +98,9 @@ test('a pose occupies real height, not a single plane', () => {
   assert.ok(points.some((point, index) => index > 1 && Math.abs(point[1] - points[1][1]) > 20), 'the chain should leave its initial plane');
 });
 
-test('guidance recovers from representative manual poses across the workspace', () => {
-  const starts = [HOME, [0, 0, 0, 0, 0, 0], [1.2, 1.1, -0.8, 0.6, -0.4, 0.2], [-1.2, 0.5, -1.5, -0.6, -0.9, -0.2]];
-  for (const arm of [ARM, ARM_B]) {
-    for (let x = 100; x <= 620; x += 130) for (let y = 110; y <= 390; y += 90) for (const z of [10, 80, 150]) {
-      const target = projectToReachableWorkspace([x, y, z], compiled.environment.safety, arm);
-      const plan = solveInverseKinematics(target, arm);
-      // Guidance converges on the plan; whether the plan reaches the target is
-      // the solver's business, and the task-goal test above covers that.
-      const planned = forwardKinematics(plan.q, arm).points.at(-1);
-      for (const start of starts) {
-        let q = [...start];
-        for (let step = 0; step < compiled.environment.max_steps; step += 1) {
-          const update = guidedStep(q, target, arm, plan);
-          assert.ok(update.action.every((delta) => Math.abs(delta) <= arm.maxActionDelta + 1e-9));
-          q = update.q;
-        }
-        assert.ok(distance(forwardKinematics(q, arm).points.at(-1), planned) < 2, `${start} did not converge on the plan for ${target}`);
-      }
-    }
-  }
-});
+// 'guidance recovers from representative manual poses across the workspace'
+// moved to test/guidance-recovery.test.js for the same reason - its dense
+// workspace sweep now runs in its own parallel process.
 
 test('an episode always ends in a named halt state', () => {
   assert.equal(haltState({ error: 3, steps: 10, budget: 200 }), HALT.REACHED);
@@ -219,29 +179,8 @@ test('the study path and source registry keep resolvable references', () => {
   assert.ok(registry.sources.every((source) => typeof source.used_for === 'string' && source.used_for.length > 0));
 });
 
-test('planTowelFoldMotion produces a valid collision-free bimanual folding trajectory', () => {
-  const safety = compiled.environment.safety;
-  const poses = [{ q: [...HOME], arm: ARM }, { q: [...HOME], arm: ARM_B }];
-  const motion = planTowelFoldMotion(poses, safety);
-  assert.ok(motion, 'Towel fold motion should be planned');
-  assert.ok(motion.frames.length > 50, 'Folding motion has multiple trajectory phases');
-
-  let previous = poses.map(({ q }) => q);
-  for (const frame of motion.frames) {
-    const assessment = evaluateCellSafety(frame.map((q, index) => ({ q, arm: index ? ARM_B : ARM })), safety);
-    assert.equal(assessment.safe, true, `Fold frame crossed ${assessment.reason}`);
-    frame.forEach((q, armIndex) => q.forEach((value, joint) => {
-      assert.ok(Math.abs(value - previous[armIndex][joint]) <= ARM.maxActionDelta + 1e-9, 'Fold frame exceeded delta cap');
-    }));
-    previous = frame;
-  }
-
-  const tipA = forwardKinematics(previous[0], ARM).points.at(-1);
-  const tipB = forwardKinematics(previous[1], ARM_B).points.at(-1);
-  assert.ok(distance(tipA, [250, 180, 15]) < 2, 'Arm A pinned at left edge');
-  assert.ok(tipB[0] < 325, 'Arm B folded across towel midline');
-  assert.ok(distance(tipA, tipB) < 70, 'Folded edge is close to pinned edge');
-});
+// 'planTowelFoldMotion produces a valid collision-free bimanual folding
+// trajectory' moved to test/towel-fold-planner.test.js for the same reason.
 
 test('liveDragStep advances one rate-capped, safety-checked step toward the pointer', () => {
   const safety = compiled.environment.safety;
