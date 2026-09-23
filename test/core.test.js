@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import compiled from '../data/compiled.json' with { type: 'json' };
 import registry from '../data/sources.json' with { type: 'json' };
-import { ARM, ARM_B, buildEpisodeArtifact, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, guidedStep, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
+import { ARM, ARM_B, buildEpisodeArtifact, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, guidedStep, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
 
 const HOME = HOME_POSE;
 const armsOf = (workflow) => (workflow.arms === 2 ? [[ARM, workflow.goal], [ARM_B, workflow.goal_b]] : [[ARM, workflow.goal]]);
@@ -223,4 +223,13 @@ test('liveDragStep refuses a step that would collide with the other arm, holding
     q = step.q;
   }
   assert.equal(sawRejection, true, 'dragging straight at the other arm should eventually be refused');
+});
+
+test('formatSolverTicker shows step, percent, and elapsed time, on every task', () => {
+  assert.equal(formatSolverTicker(), 'Solver idle');
+  assert.equal(formatSolverTicker({ steps: 0, totalSteps: 0, elapsedMs: 500 }), 'Solver idle', 'no path planned yet is idle regardless of a stray elapsed time');
+  assert.equal(formatSolverTicker({ steps: 27, totalSteps: 272, elapsedMs: 1234 }), 'Solving · step 27/272 · 10% · 1.2s');
+  assert.equal(formatSolverTicker({ steps: 272, totalSteps: 272, elapsedMs: 4000 }), 'Solving · step 272/272 · 100% · 4.0s');
+  assert.equal(formatSolverTicker({ steps: 400, totalSteps: 272, elapsedMs: 4000 }), 'Solving · step 272/272 · 100% · 4.0s', 'steps past the plan length clamp to it');
+  assert.equal(formatSolverTicker({ steps: -5, totalSteps: 100, elapsedMs: -50 }), 'Solving · step 0/100 · 0% · 0.0s', 'negative inputs clamp rather than produce garbage');
 });

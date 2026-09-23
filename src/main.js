@@ -1,7 +1,7 @@
 import './styles.css';
 import compiled from '../data/compiled.json';
 import registry from '../data/sources.json';
-import { ARM, ARM_B, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, solveInverseKinematics } from './core.js';
+import { ARM, ARM_B, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, solveInverseKinematics } from './core.js';
 import { ClothSimulator } from './cloth.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -31,7 +31,7 @@ const state = {
   replaying: false,
   familyFilter: 'all',
   modelFilter: 'all',
-  policy: { status: HALT.IDLE, steps: 0, speed: 1, budget: compiled.workflows[0].horizon_steps, loop: false, frame: null, accumulator: 0, restart: null, path: null, pathIndex: 0 },
+  policy: { status: HALT.IDLE, steps: 0, speed: 1, budget: compiled.workflows[0].horizon_steps, loop: false, frame: null, accumulator: 0, restart: null, path: null, pathIndex: 0, solveStartedAt: null },
   safetyNotice: null,
   voice: { dataUrl: null, mimeType: null, transcript: '', audioUrl: null, recorder: null, recognition: null, stream: null, bytes: 0, captureTimeout: null },
   frameHistory: [],
@@ -399,6 +399,22 @@ function updatePolicyProgressBar() {
     wrap.classList.toggle('running', state.policy.status === HALT.RUNNING);
     wrap.classList.toggle('reached', state.policy.status === HALT.REACHED);
   }
+  updateSolverTicker();
+}
+
+/**
+ * Live solver progress ticker, shown for every task - not just the
+ * bimanual fold - since every task runs the same demo planner underneath.
+ * Ticks on its own interval (below) so the elapsed time keeps advancing
+ * between discrete policy steps, the same way the sim-time clock does.
+ */
+function updateSolverTicker() {
+  const el = $('#solver-ticker');
+  if (!el) return;
+  const total = state.policy.path?.length || (state.policy.status === HALT.RUNNING ? policyBudget() : 0);
+  const elapsedMs = state.policy.solveStartedAt !== null ? performance.now() - state.policy.solveStartedAt : 0;
+  el.textContent = formatSolverTicker({ steps: state.policy.steps, totalSteps: total, elapsedMs });
+  el.classList.toggle('running', state.policy.status === HALT.RUNNING);
 }
 
 function loadSimulationStep(stepIndex) {
@@ -926,6 +942,7 @@ function startPolicy() {
   state.policy.status = HALT.RUNNING;
   state.policy.steps = 0;
   state.policy.accumulator = 0;
+  state.policy.solveStartedAt = performance.now();
   state.timeline.scrubbing = false;
 
   const clothSnap = viewport.instance?.getClothSnapshot?.() || state.cloth2d?.snapshot();
@@ -961,6 +978,7 @@ function resetArms() {
   state.policy.pathIndex = 0;
   state.policy.accumulator = 0;
   state.policy.steps = 0;
+  state.policy.solveStartedAt = null;
   state.frameHistory = [];
   state.timeline.currentStep = 0;
   state.timeline.scrubbing = false;
@@ -978,6 +996,7 @@ function resetArms() {
   syncSliders();
   updateArms();
   updateTimelineSlider();
+  updateSolverTicker();
 }
 
 /**
@@ -1172,3 +1191,4 @@ renderScenarioSelect(); renderFamilyFilters(); renderModels(); renderDatasets();
 loadWorkflow(compiled.workflows[0].id);
 renderHaltState();
 setInterval(() => { $('#sim-time').textContent = `T + ${fmt((performance.now() - state.startedAt) / 1000, 1).padStart(4, '0')} s`; }, 100);
+setInterval(updateSolverTicker, 100);

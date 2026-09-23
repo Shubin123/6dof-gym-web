@@ -96,3 +96,5 @@
 .policy-progress-track{flex:1;height:5px;background:#141c28;border:1px solid #233144;border-radius:3px;overflow:hidden;position:relative}
 .policy-progress-fill{height:100%;width:0%;background:linear-gradient(90deg,#38bdf8,#c9fb5d);border-radius:3px;transition:width .08s ease-out;box-shadow:0 0 6px rgba(201,251,93,.45)}
 .policy-progress-label{font:9px var(--mono);color:#c9fb5d;min-width:26px;text-align:right;letter-spacing:.3px}
+.solver-ticker{font:9px var(--mono);color:#6f8199;letter-spacing:.2px;opacity:.75;transition:opacity .2s ease,color .2s ease}
+.solver-ticker.running{color:#c9fb5d;opacity:1}

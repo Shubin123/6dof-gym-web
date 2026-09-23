@@ -540,3 +540,18 @@ export function computePolicyProgress(steps, totalSteps) {
   const clampedSteps = Math.max(0, steps || 0);
   return Math.min(100, Math.round((clampedSteps / totalSteps) * 100));
 }
+
+/**
+ * Format a live solver progress ticker: step count, percent, and elapsed
+ * wall time. Every task runs the same demo planner (planSafeCellMotion, or
+ * planTowelFoldMotion for the bimanual fold), so this is task-agnostic by
+ * construction - there is nothing fold-specific to gate it behind.
+ */
+export function formatSolverTicker({ steps = 0, totalSteps = 0, elapsedMs = 0 } = {}) {
+  const safeTotal = Math.max(0, Math.round(totalSteps || 0));
+  if (safeTotal === 0) return 'Solver idle';
+  const safeSteps = clamp(Math.round(steps || 0), 0, safeTotal);
+  const pct = computePolicyProgress(safeSteps, safeTotal);
+  const seconds = Math.max(0, elapsedMs || 0) / 1000;
+  return `Solving · step ${safeSteps}/${safeTotal} · ${pct}% · ${seconds.toFixed(1)}s`;
+}
