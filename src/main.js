@@ -1,7 +1,7 @@
 import './styles.css';
 import compiled from '../data/compiled.json';
 import registry from '../data/sources.json';
-import { ARM, ARM_B, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, solveInverseKinematics } from './core.js';
+import { ARM, ARM_B, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, solveInverseKinematics } from './core.js';
 import { ClothSimulator } from './cloth.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -980,11 +980,67 @@ function resetArms() {
   updateTimelineSlider();
 }
 
+/**
+ * Drag-to-record the arm in the 2-D scene.
+ *
+ * A plain click keeps the original behavior (set a full goal, let
+ * replanArms find a plan). Once the pointer actually moves past a small
+ * threshold it becomes a live drag instead: each frame takes one
+ * liveDragStep toward the pointer — rate-capped and rejected outright by
+ * the same floor/workspace/inter-arm envelope as everything else — and,
+ * while `state.recording` is on, records a transition per frame, exactly
+ * like nudging a joint slider but by dragging the tool itself.
+ */
+let sceneDrag = null;
+
+function scenePointFromEvent(event) {
+  const rect = event.currentTarget.getBoundingClientRect();
+  return [(event.clientX - rect.left) / rect.width * 760, (event.clientY - rect.top) / rect.height * 490];
+}
+
+function onSceneDragMove(event) {
+  if (!sceneDrag) return;
+  if (!sceneDrag.dragging) {
+    if (Math.hypot(event.clientX - sceneDrag.pressedAt.x, event.clientY - sceneDrag.pressedAt.y) < 6) return;
+    sceneDrag.dragging = true;
+  }
+  const [x, y] = scenePointFromEvent(event);
+  const { armState } = sceneDrag;
+  const otherPoses = activeArms().filter((candidate) => candidate !== armState).map(({ q, arm }) => ({ q, arm }));
+  const previous = armState.q;
+  const step = liveDragStep(previous, [x, y, armState.goal[2]], armState.arm, compiled.environment.safety, otherPoses);
+  state.safetyNotice = step.safety.safe ? null : step.safety.reason;
+  if (!step.moved) { updateTelemetry(); return; }
+  armState.q = step.q;
+  armState.lastAction = step.q.map((value, index) => value - previous[index]);
+  armState.goal = projectToReachableWorkspace([x, y, armState.goal[2]], compiled.environment.safety, armState.arm);
+  state.step += 1;
+  syncSliders();
+  updateArms();
+  addTransition();
+}
+
+function endSceneDrag(event) {
+  if (!sceneDrag) return;
+  const { dragging } = sceneDrag;
+  sceneDrag = null;
+  if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  if (dragging) { replanArms(); syncSliders(); return; }
+  // No movement past the threshold: treat it as the original click-to-set-goal.
+  setGoalFromScene(scenePointFromEvent(event));
+}
+
 function installListeners() {
   $('#scene').addEventListener('pointerdown', (event) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    setGoalFromScene([(event.clientX - rect.left) / rect.width * 760, (event.clientY - rect.top) / rect.height * 490]);
+    const point = scenePointFromEvent(event);
+    const arm = nearestArm(point, activeArms().map((armState) => armState.arm));
+    const armState = state.arms.find((candidate) => candidate.arm.id === arm.id);
+    sceneDrag = { armState, pressedAt: { x: event.clientX, y: event.clientY }, dragging: false };
+    event.currentTarget.setPointerCapture(event.pointerId);
   });
+  $('#scene').addEventListener('pointermove', onSceneDragMove);
+  $('#scene').addEventListener('pointerup', endSceneDrag);
+  $('#scene').addEventListener('pointercancel', endSceneDrag);
   $('#view-2d').addEventListener('click', () => setViewportMode('2d'));
   $('#view-3d').addEventListener('click', () => setViewportMode('3d'));
   $('#scenario').addEventListener('change', (event) => loadWorkflow(event.target.value));
