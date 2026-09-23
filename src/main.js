@@ -1,7 +1,8 @@
 import './styles.css';
 import compiled from '../data/compiled.json';
 import registry from '../data/sources.json';
-import { ARM, ARM_B, buildEpisodeArtifact, clamp, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, projectToReachableWorkspace, solveInverseKinematics } from './core.js';
+import { ARM, ARM_B, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, solveInverseKinematics } from './core.js';
+import { ClothSimulator } from './cloth.js';
 
 const $ = (selector) => document.querySelector(selector);
 const fmt = (value, digits = 2) => Number(value).toFixed(digits);
@@ -33,6 +34,9 @@ const state = {
   policy: { status: HALT.IDLE, steps: 0, speed: 1, budget: compiled.workflows[0].horizon_steps, loop: false, frame: null, accumulator: 0, restart: null, path: null, pathIndex: 0 },
   safetyNotice: null,
   voice: { dataUrl: null, mimeType: null, transcript: '', audioUrl: null, recorder: null, recognition: null, stream: null, bytes: 0, captureTimeout: null },
+  frameHistory: [],
+  cloth2d: new ClothSimulator({ columns: 12, rows: 9, width: 1.5, height: 1.2 }),
+  timeline: { currentStep: 0, totalSteps: 0, scrubbing: false },
 };
 
 const activeArms = () => state.arms.slice(0, state.armCount);
@@ -236,10 +240,10 @@ function replayEpisode() {
       armState.lastAction = transition.action_after_safety_clamp.slice(armIndex * 7, armIndex * 7 + 6);
     });
     state.step = transition.index;
-    syncSliders(); updateArms();
+    syncSliders(); updateArms(); updateTimelineSlider();
     index += 1;
     if (index < state.transitions.length) setTimeout(run, 1000 / compiled.environment.control_hz / state.policy.speed);
-    else { state.replaying = false; $('#replay').textContent = '↻ Replay episode'; }
+    else { state.replaying = false; $('#replay').textContent = '↻ Replay episode'; updateTimelineSlider(); }
   };
   if (state.voice.dataUrl) new Audio(state.voice.dataUrl).play().catch(() => {});
   run();
@@ -264,6 +268,7 @@ function importEpisode(file) {
       $('#download').disabled = false;
       $('#replay').disabled = !state.transitions.length;
       setVoiceStatus(state.voice.dataUrl ? 'Episode imported · audio ready to replay' : 'Episode imported · no audio attached');
+      updateTimelineSlider();
     } catch {
       setVoiceStatus('Could not import that episode file', true);
     }
@@ -300,8 +305,147 @@ function updateArms() {
     group.querySelector('.gripper').innerHTML = `<path class="grip" d="M${x} ${y} l${Math.cos(heading + spread) * 19} ${Math.sin(heading + spread) * 19} M${x} ${y} l${Math.cos(heading - spread) * 19} ${Math.sin(heading - spread) * 19}"/>`;
   });
   updateGoals();
+  updateCloth2D();
   pushViewportState();
   updateTelemetry();
+}
+
+function updateCloth2D() {
+  const clothGroup = $('#cloth-2d');
+  if (!clothGroup) return;
+  const isFold = state.currentWorkflow.id === 'fold';
+  setHidden(clothGroup, !isFold);
+  if (!isFold) return;
+
+  const tips = activeArms().map((armState) => {
+    const { points } = forwardKinematics(armState.q, armState.arm);
+    const tip = points.at(-1);
+    return {
+      x: (tip[0] - 325) / 100,
+      y: (tip[1] - 240) / 100,
+      z: (tip[2] || 0) / 100,
+    };
+  });
+
+  state.cloth2d.step({
+    targetA: tips[0],
+    targetB: tips[1],
+  });
+
+  const { basePoints, creasePoints } = state.cloth2d.get2DPolygons([325, 240], 100);
+  const pathString = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0], 1)} ${fmt(p[1], 1)}`).join(' ') + ' Z';
+  const creaseString = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0], 1)} ${fmt(p[1], 1)}`).join(' ');
+
+  clothGroup.innerHTML = `
+    <path class="cloth-2d-base" d="${pathString(basePoints)}" />
+    <path class="cloth-2d-crease" d="${creaseString(creasePoints)}" />
+    <circle class="cloth-2d-pin" cx="${fmt(basePoints[0][0], 1)}" cy="${fmt(basePoints[0][1], 1)}" r="4" />
+  `;
+}
+
+function updateTimelineSlider() {
+  const slider = $('#loading-sliderbar');
+  const status = $('#loading-sliderbar-status');
+  const progress = $('#loading-sliderbar-progress');
+  const mode = $('#loading-sliderbar-mode');
+  if (!slider) return;
+
+  const total = Math.max(
+    state.policy.path?.length || 0,
+    state.frameHistory.length ? state.frameHistory.length - 1 : 0,
+    state.transitions.length ? state.transitions.length - 1 : 0,
+    1,
+  );
+  const current = clamp(
+    state.timeline.scrubbing ? state.timeline.currentStep : (state.policy.steps || state.step || 0),
+    0,
+    total,
+  );
+
+  slider.min = '0';
+  slider.max = String(total);
+  slider.value = String(current);
+
+  const pct = Math.round((current / total) * 100);
+  if (progress) progress.style.width = `${pct}%`;
+  if (status) status.textContent = `Step ${current} / ${total} (${pct}%)`;
+  if (mode) {
+    if (state.policy.status === HALT.RUNNING) mode.textContent = 'RUNNING';
+    else if (state.replaying) mode.textContent = 'REPLAY';
+    else if (state.timeline.scrubbing) mode.textContent = 'SCRUB';
+    else mode.textContent = 'READY';
+  }
+  updatePolicyProgressBar();
+}
+
+function updatePolicyProgressBar() {
+  const wrap = $('#policy-progress-wrap');
+  const fill = $('#policy-progress-fill');
+  const label = $('#policy-progress-label');
+  if (!fill) return;
+
+  const total = state.policy.path?.length || policyBudget();
+  const current = state.policy.steps || 0;
+  const pct = computePolicyProgress(current, total);
+
+  fill.style.width = `${pct}%`;
+  if (label) label.textContent = `${pct}%`;
+  if (wrap) {
+    wrap.setAttribute('aria-valuenow', String(pct));
+    wrap.classList.toggle('running', state.policy.status === HALT.RUNNING);
+    wrap.classList.toggle('reached', state.policy.status === HALT.REACHED);
+  }
+}
+
+function loadSimulationStep(stepIndex) {
+  state.timeline.scrubbing = true;
+  state.timeline.currentStep = stepIndex;
+
+  if (state.policy.status === HALT.RUNNING) {
+    haltPolicy(HALT.OPERATOR);
+  }
+
+  const historyEntry = state.frameHistory[stepIndex];
+  if (historyEntry) {
+    activeArms().forEach((armState, armIndex) => {
+      if (historyEntry.arms?.[armIndex]) {
+        armState.q = [...historyEntry.arms[armIndex].q];
+        armState.goal = [...historyEntry.arms[armIndex].goal];
+        armState.lastAction = [...historyEntry.arms[armIndex].lastAction];
+      }
+    });
+    state.step = historyEntry.step ?? stepIndex;
+    state.policy.steps = stepIndex;
+    if (historyEntry.clothSnapshot) {
+      viewport.instance?.restoreCloth?.(historyEntry.clothSnapshot);
+      state.cloth2d?.restore?.(historyEntry.clothSnapshot);
+    }
+  } else if (state.policy.path?.[stepIndex]) {
+    const frame = state.policy.path[stepIndex];
+    activeArms().forEach((armState, index) => {
+      if (frame[index]) {
+        armState.q = [...frame[index]];
+      }
+    });
+    state.step = stepIndex;
+    state.policy.steps = stepIndex;
+  } else if (state.transitions[stepIndex]) {
+    const transition = state.transitions[stepIndex];
+    activeArms().forEach((armState, armIndex) => {
+      const block = transition.observation.slice(armIndex * 22, armIndex * 22 + 22);
+      if (block.length >= 22) {
+        armState.q = block.slice(0, 6);
+        armState.goal = block.slice(19, 22);
+        armState.lastAction = transition.action_after_safety_clamp.slice(armIndex * 7, armIndex * 7 + 6);
+      }
+    });
+    state.step = transition.index;
+    state.policy.steps = stepIndex;
+  }
+
+  syncSliders();
+  updateArms();
+  updateTimelineSlider();
 }
 
 function updateGoals() {
@@ -475,9 +619,11 @@ async function mountViewport3D() {
       workspace: compiled.environment.safety,
       onGoalPick: (point) => setGoalFromScene(point),
       onGoalHeight: setGoalHeight,
-      onClothFrame: ({ frames, captured, settled }) => {
+      onClothFrame: ({ frames, captured, settled, foldMetrics }) => {
         if (state.currentWorkflow.id !== 'fold') return;
-        $('#cloth-status').textContent = `Cloth frames ${frames} / 120 · ${captured.map((value, index) => `${index ? 'B' : 'A'} ${value ? 'held' : 'free'}`).join(' · ')}${settled ? ' · settled' : ''}`;
+        const foldDist = foldMetrics ? ` · fold: ${fmt(foldMetrics.frontDistance * 10, 1)} cm` : '';
+        const foldStatus = foldMetrics?.folded ? ' · folded' : '';
+        $('#cloth-status').textContent = `Cloth frames ${frames} / 120 · ${captured.map((value, index) => `${index ? 'B' : 'A'} ${value ? 'held' : 'free'}`).join(' · ')}${settled ? ' · settled' : ''}${foldDist}${foldStatus}`;
       },
     });
     viewport.instance = instance;
@@ -504,20 +650,47 @@ async function setViewportMode(mode) {
     viewport.instance?.stop();
     setHidden($('#stage-3d'), true);
     setHidden($('#scene'), false);
+    setHidden($('#viewport-loader'), true);
     $('#viewport-hint').textContent = 'Click anywhere in the scene to move the goal.';
     return;
   }
 
+  const loader = $('#viewport-loader');
+  const loaderFill = $('#viewport-loader-fill');
+  const loaderPercent = $('#viewport-loader-percent');
+  const loaderStep = $('#viewport-loader-step');
+
+  const setLoaderProgress = (percent, text) => {
+    if (loader) setHidden(loader, false);
+    if (loaderFill) loaderFill.style.width = `${percent}%`;
+    if (loaderPercent) loaderPercent.textContent = `${percent}%`;
+    if (loaderStep) loaderStep.textContent = text;
+  };
+
+  setLoaderProgress(15, 'Loading Three.js graphics engine…');
   $('#viewport-hint').textContent = 'Loading the 3-D viewport…';
+
   try {
+    setLoaderProgress(40, 'Building spatial kinematics & workcell…');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    setLoaderProgress(70, 'Initializing Position-Based Dynamics cloth physics…');
     const instance = await mountViewport3D();
+    setLoaderProgress(95, 'Compiling WebGL shaders & lighting…');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    setLoaderProgress(100, 'Ready');
+
     viewport.mode = '3d';
     setHidden($('#scene'), true);
     setHidden($('#stage-3d'), false);
+    setTimeout(() => {
+      if (loader) setHidden(loader, true);
+    }, 200);
+
     instance.start();
     pushViewportState();
     $('#viewport-hint').textContent = 'Drag to orbit · scroll to zoom · click the floor to move a goal · drag a cube up or down to change its height.';
   } catch (error) {
+    if (loader) setHidden(loader, true);
     viewport.failed = true;
     $('#view-2d').classList.add('active');
     $('#view-3d').classList.remove('active');
@@ -602,7 +775,7 @@ function loadWorkflow(id, { scroll = false } = {}) {
   state.policy.path = null;
   state.policy.pathIndex = 0;
   state.policy.accumulator = 0;
-  state.policy.budget = workflow.horizon_steps;
+  state.policy.budget = workflow.id === 'fold' ? 360 : workflow.horizon_steps;
   state.policy.loop = workflow.id === 'fold';
   $('#policy-loop').checked = state.policy.loop;
   $('#policy-budget').value = state.policy.budget;
@@ -610,6 +783,12 @@ function loadWorkflow(id, { scroll = false } = {}) {
   $('#policy-profile').textContent = workflow.id === 'fold' ? 'Towel-fold specialist' : 'Geometric policy';
   setHidden($('#cloth-status'), workflow.id !== 'fold');
   $('#cloth-status').textContent = 'Cloth frames 0 / 120';
+  state.cloth2d?.reset();
+  viewport.instance?.resetCloth?.();
+  state.frameHistory = [];
+  state.timeline.currentStep = 0;
+  state.timeline.scrubbing = false;
+  updateTimelineSlider();
   setArmGoal(state.arms[0], [...workflow.goal, workflow.goal_height], { replan: false });
   setArmGoal(state.arms[1], [...(workflow.goal_b || workflow.goal), workflow.goal_height], { replan: false });
   replanArms();
@@ -645,6 +824,7 @@ function renderHaltState() {
   element.textContent = HALT_COPY[state.policy.status]();
   element.className = `halt-state ${state.policy.status}`;
   $('#run-policy').textContent = state.policy.status === HALT.RUNNING ? '■ Halt policy' : 'Run demo policy';
+  updatePolicyProgressBar();
 }
 
 /** Advance one prevalidated floor- and collision-safe control frame. */
@@ -672,6 +852,15 @@ function policyStep() {
   syncSliders();
   updateArms();
   addTransition();
+
+  const clothSnap = viewport.instance?.getClothSnapshot?.() || state.cloth2d?.snapshot();
+  state.frameHistory[state.policy.steps] = {
+    step: state.step,
+    arms: activeArms().map((a) => ({ q: [...a.q], goal: [...a.goal], lastAction: [...a.lastAction] })),
+    clothSnapshot: clothSnap,
+  };
+  updateTimelineSlider();
+
   return haltState({ error, steps: state.policy.steps, budget: policyBudget() });
 }
 
@@ -709,22 +898,41 @@ function settlePolicy(status) {
 }
 
 function startPolicy() {
-  if (state.policy.status === HALT.RUNNING) return;
   clearTimeout(state.policy.restart);
   state.policy.restart = null;
   if (!replanArms()) { state.policy.status = HALT.SAFETY; renderHaltState(); return; }
-  const motion = planSafeCellMotion(
-    activeArms().map(({ q, arm }) => ({ q, arm })),
-    activeArms().map(({ plan }) => plan.q),
-    compiled.environment.safety,
-  );
+
+  let motion = null;
+  if (state.currentWorkflow.id === 'fold' && activeArms().length === 2) {
+    motion = planTowelFoldMotion(
+      activeArms().map(({ q, arm }) => ({ q, arm })),
+      compiled.environment.safety,
+    );
+  }
+  if (!motion) {
+    motion = planSafeCellMotion(
+      activeArms().map(({ q, arm }) => ({ q, arm })),
+      activeArms().map(({ plan }) => plan.q),
+      compiled.environment.safety,
+    );
+  }
   if (!motion) { state.safetyNotice = 'workspace'; state.policy.status = HALT.SAFETY; renderHaltState(); updateTelemetry(); return; }
   state.policy.path = motion.frames;
   state.policy.pathIndex = 0;
   state.policy.status = HALT.RUNNING;
   state.policy.steps = 0;
   state.policy.accumulator = 0;
+  state.timeline.scrubbing = false;
+
+  const clothSnap = viewport.instance?.getClothSnapshot?.() || state.cloth2d?.snapshot();
+  state.frameHistory = [{
+    step: state.step,
+    arms: activeArms().map((a) => ({ q: [...a.q], goal: [...a.goal], lastAction: [...a.lastAction] })),
+    clothSnapshot: clothSnap,
+  }];
+
   renderHaltState();
+  updateTimelineSlider();
   state.policy.frame = requestAnimationFrame(policyFrame);
 }
 
@@ -748,8 +956,15 @@ function resetArms() {
   state.policy.path = null;
   state.policy.pathIndex = 0;
   state.policy.accumulator = 0;
+  state.policy.steps = 0;
+  state.frameHistory = [];
+  state.timeline.currentStep = 0;
+  state.timeline.scrubbing = false;
+  state.cloth2d?.reset();
+  viewport.instance?.resetCloth?.();
   syncSliders();
   updateArms();
+  updateTimelineSlider();
 }
 
 function installListeners() {
@@ -805,6 +1020,17 @@ function installListeners() {
     if (!state.policy.loop) { clearTimeout(state.policy.restart); state.policy.restart = null; }
     else if (state.policy.status === HALT.BUDGET) settlePolicy(HALT.BUDGET);
   });
+  const timelineSlider = $('#loading-sliderbar');
+  if (timelineSlider) {
+    timelineSlider.addEventListener('input', (event) => {
+      loadSimulationStep(Number(event.target.value));
+    });
+    timelineSlider.addEventListener('change', (event) => {
+      loadSimulationStep(Number(event.target.value));
+      state.timeline.scrubbing = false;
+      updateTimelineSlider();
+    });
+  }
   $('#reset').addEventListener('click', () => { haltPolicy(HALT.IDLE, { silent: true }); resetArms(); });
   $('#record').addEventListener('click', () => {
     if (state.recording) { stopRecording(); return; }

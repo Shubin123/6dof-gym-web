@@ -353,6 +353,72 @@ export function planSafeCellMotion(poses, targets, safety = {}) {
   return best;
 }
 
+let cachedFoldPath = null;
+
+/**
+ * Specialized bimanual motion planner for the laundry folding demo (Task 07).
+ *
+ * Coordinates both arms through the teachable folding sequence:
+ *  1. Arm A & Arm B safely approach the towel corners (pin left, grasp right)
+ *  2. Arm A firmly pins the left edge to the table
+ *  3. Arm B lifts the right edge, arcs across the midline, and folds it over
+ *  4. Arm B lowers and places the folded edge near the pinned edge
+ *  5. Holds the fold while the physical cloth settles into rest
+ *
+ * Every frame is validated against floor, workspace, and inter-arm clearance limits.
+ */
+export function planTowelFoldMotion(poses, safety = {}) {
+  if (poses.length < 2) return null;
+  const armA = poses[0].arm || ARM;
+  const armB = poses[1].arm || ARM_B;
+
+  const goalA = [250, 180, 15];
+  const goalB = [400, 180, 15];
+  const planA = solveInverseKinematics(goalA, armA, safety);
+  const planB = solveInverseKinematics(goalB, armB, safety, [{ q: planA.q, arm: armA }]);
+
+  if (!planA?.safety?.safe || !planB?.safety?.safe) return null;
+
+  const isHomeA = jointDistance(poses[0].q, HOME_POSE) < 1e-3;
+  const isHomeB = jointDistance(poses[1].q, HOME_POSE) < 1e-3;
+
+  if (isHomeA && isHomeB && cachedFoldPath) {
+    return { frames: cachedFoldPath.map((f) => [[...f[0]], [...f[1]]]), planA, planB };
+  }
+
+  const frames = [];
+  const approach = planSafeCellMotion(poses, [planA.q, planB.q], safety);
+  if (!approach) return null;
+  for (const frame of approach.frames) frames.push([[...frame[0]], [...frame[1]]]);
+
+  let curB = frames.length ? frames.at(-1)[1] : poses[1].q;
+  const foldWaypoints = [
+    [380, 180, 45],
+    [340, 180, 45],
+    [310, 180, 28],
+  ];
+  for (const wp of foldWaypoints) {
+    const planWp = solveInverseKinematics(wp, armB, safety, [{ q: planA.q, arm: armA }]);
+    if (!planWp?.safety?.safe) return null;
+    const path = planSafeMotion(curB, planWp.q, armB, safety, [{ q: planA.q, arm: armA }]);
+    if (!path) return null;
+    for (const q of path) {
+      frames.push([[...planA.q], [...q]]);
+    }
+    curB = path.at(-1);
+  }
+
+  for (let h = 0; h < 12; h += 1) {
+    frames.push([[...planA.q], [...curB]]);
+  }
+
+  if (isHomeA && isHomeB) {
+    cachedFoldPath = frames.map((f) => [[...f[0]], [...f[1]]]);
+  }
+
+  return { frames, planA, planB };
+}
+
 /**
  * Clamp a goal into the table bounds, the height band, and the arm's reach shell.
  *
@@ -427,4 +493,11 @@ export function buildEpisodeArtifact({ environment, task, transitions, voice, ar
       audio_data_url: voice?.dataUrl || null,
     },
   };
+}
+
+/** Calculate 0-100 progress percentage for demo policy execution. */
+export function computePolicyProgress(steps, totalSteps) {
+  if (!totalSteps || totalSteps <= 0) return 0;
+  const clampedSteps = Math.max(0, steps || 0);
+  return Math.min(100, Math.round((clampedSteps / totalSteps) * 100));
 }

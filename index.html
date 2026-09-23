@@ -40,13 +40,39 @@
                 <defs><linearGradient id="floor" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#1a2130"/><stop offset="1" stop-color="#0e131d"/></linearGradient><filter id="glow"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
                 <rect width="760" height="490" fill="url(#floor)"/><path d="M0 370H760M0 250H760M0 130H760M120 0V490M280 0V490M440 0V490M600 0V490" class="grid"/>
                 <rect x="80" y="90" width="560" height="310" rx="20" class="workspace"/>
+                <g id="cloth-2d" class="cloth-2d" hidden></g>
                 <g id="goals"></g>
                 <g id="arms"></g>
                 <g transform="translate(52 453)"><circle r="5" class="legend-dot"/><text x="13" y="5">reachable workspace</text></g>
               </svg>
               <div id="stage-3d" class="stage-3d" hidden aria-label="Three-dimensional robot arm viewport"></div>
+              <div id="viewport-loader" class="viewport-loader" hidden>
+                <div class="viewport-loader-card">
+                  <div class="viewport-loader-header">
+                    <span class="viewport-loader-title">Loading 3-D simulation &amp; cloth physics…</span>
+                    <span id="viewport-loader-percent" class="viewport-loader-percent">0%</span>
+                  </div>
+                  <div class="viewport-loader-track">
+                    <div id="viewport-loader-fill" class="viewport-loader-fill" style="width: 0%"></div>
+                  </div>
+                  <p id="viewport-loader-step" class="viewport-loader-step">Initializing WebGL engine…</p>
+                </div>
+              </div>
             </div>
             <p id="viewport-hint" class="viewport-hint">Click anywhere in the scene to move the nearest arm's goal.</p>
+            <div class="timeline-bar" id="timeline-bar">
+              <div class="timeline-bar-header">
+                <label class="loading-sliderbar-label" for="loading-sliderbar">
+                  <span>Loading sliderbar</span>
+                  <span id="loading-sliderbar-mode" class="loading-sliderbar-mode">READY</span>
+                </label>
+                <span id="loading-sliderbar-status" class="loading-sliderbar-status">Step 0 / 0 (0%)</span>
+              </div>
+              <div class="loading-sliderbar-track">
+                <div id="loading-sliderbar-progress" class="loading-sliderbar-progress" style="width: 0%"></div>
+                <input id="loading-sliderbar" class="loading-sliderbar" type="range" min="0" max="0" value="0" step="1" aria-label="Simulation step loading sliderbar" />
+              </div>
+            </div>
             <div class="policy-bar">
               <span id="halt-state" class="halt-state idle">Idle · policy not running</span>
               <span id="policy-profile" class="policy-profile">Geometric policy</span>
@@ -55,7 +81,19 @@
               <label class="policy-speed">Speed<input id="policy-speed" type="range" min="0.25" max="8" step="0.25" value="1" aria-label="Policy playback speed" /><output id="policy-speed-value">1.00×</output></label>
               <label class="policy-loop"><input id="policy-loop" type="checkbox" /> Retry until goal</label>
             </div>
-            <div class="scene-controls"><button id="reset" class="icon-button">↺ Reset</button><button id="run-policy" class="button compact primary">Run demo policy</button><button id="record" class="icon-button">● Record</button></div>
+            <div class="scene-controls">
+              <button id="reset" class="icon-button">↺ Reset</button>
+              <div class="policy-run-container">
+                <button id="run-policy" class="button compact primary">Run demo policy</button>
+                <div id="policy-progress-wrap" class="policy-progress-wrap" role="progressbar" aria-label="Demo policy progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                  <div class="policy-progress-track">
+                    <div id="policy-progress-fill" class="policy-progress-fill" style="width: 0%"></div>
+                  </div>
+                  <span id="policy-progress-label" class="policy-progress-label">0%</span>
+                </div>
+              </div>
+              <button id="record" class="icon-button">● Record</button>
+            </div>
           </section>
           <aside class="control-panel">
             <div class="panel-tabs" role="tablist"><button class="tab active" data-tab="control">Control</button><button class="tab" data-tab="telemetry">Telemetry</button><button class="tab" data-tab="episode">Episode</button></div>

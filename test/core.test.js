@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import compiled from '../data/compiled.json' with { type: 'json' };
 import registry from '../data/sources.json' with { type: 'json' };
-import { ARM, ARM_B, buildEpisodeArtifact, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, guidedStep, HALT, haltState, HOME_POSE, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
+import { ARM, ARM_B, buildEpisodeArtifact, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, guidedStep, HALT, haltState, HOME_POSE, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
 
 const HOME = HOME_POSE;
 const armsOf = (workflow) => (workflow.arms === 2 ? [[ARM, workflow.goal], [ARM_B, workflow.goal_b]] : [[ARM, workflow.goal]]);
@@ -217,4 +217,28 @@ test('the study path and source registry keep resolvable references', () => {
   }
   assert.ok(registry.sources.every((source) => /^https:\/\//.test(source.url)));
   assert.ok(registry.sources.every((source) => typeof source.used_for === 'string' && source.used_for.length > 0));
+});
+
+test('planTowelFoldMotion produces a valid collision-free bimanual folding trajectory', () => {
+  const safety = compiled.environment.safety;
+  const poses = [{ q: [...HOME], arm: ARM }, { q: [...HOME], arm: ARM_B }];
+  const motion = planTowelFoldMotion(poses, safety);
+  assert.ok(motion, 'Towel fold motion should be planned');
+  assert.ok(motion.frames.length > 50, 'Folding motion has multiple trajectory phases');
+
+  let previous = poses.map(({ q }) => q);
+  for (const frame of motion.frames) {
+    const assessment = evaluateCellSafety(frame.map((q, index) => ({ q, arm: index ? ARM_B : ARM })), safety);
+    assert.equal(assessment.safe, true, `Fold frame crossed ${assessment.reason}`);
+    frame.forEach((q, armIndex) => q.forEach((value, joint) => {
+      assert.ok(Math.abs(value - previous[armIndex][joint]) <= ARM.maxActionDelta + 1e-9, 'Fold frame exceeded delta cap');
+    }));
+    previous = frame;
+  }
+
+  const tipA = forwardKinematics(previous[0], ARM).points.at(-1);
+  const tipB = forwardKinematics(previous[1], ARM_B).points.at(-1);
+  assert.ok(distance(tipA, [250, 180, 15]) < 2, 'Arm A pinned at left edge');
+  assert.ok(tipB[0] < 325, 'Arm B folded across towel midline');
+  assert.ok(distance(tipA, tipB) < 70, 'Folded edge is close to pinned edge');
 });
