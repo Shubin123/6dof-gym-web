@@ -30,7 +30,7 @@ const state = {
   replaying: false,
   familyFilter: 'all',
   modelFilter: 'all',
-  policy: { status: HALT.IDLE, steps: 0, speed: 1, loop: false, frame: null, accumulator: 0, restart: null, path: null, pathIndex: 0 },
+  policy: { status: HALT.IDLE, steps: 0, speed: 1, budget: compiled.workflows[0].horizon_steps, loop: false, frame: null, accumulator: 0, restart: null, path: null, pathIndex: 0 },
   safetyNotice: null,
   voice: { dataUrl: null, mimeType: null, transcript: '', audioUrl: null, recorder: null, recognition: null, stream: null, bytes: 0, captureTimeout: null },
 };
@@ -210,6 +210,16 @@ function replayEpisode() {
       const block = transition.observation.slice(armIndex * 22, armIndex * 22 + 22);
       return block.length < 22 ? armState.q : block.slice(0, 6);
     });
+    const exceedsJointStep = replayQs.some((q, armIndex) => q.some((value, joint) => (
+      Math.abs(value - state.arms[armIndex].q[joint]) > state.arms[armIndex].arm.maxActionDelta + 1e-9
+    )));
+    if (exceedsJointStep) {
+      state.replaying = false;
+      state.safetyNotice = 'rate';
+      $('#replay').textContent = '↻ Replay episode';
+      updateTelemetry();
+      return;
+    }
     const replaySafety = evaluateCellSafety(replayQs.map((q, index) => ({ q, arm: state.arms[index].arm })), compiled.environment.safety);
     if (!replaySafety.safe) {
       state.replaying = false;
@@ -319,6 +329,8 @@ function pushViewportState() {
       q: [...armState.q],
       goal: [...armState.goal],
     })),
+    taskId: state.currentWorkflow.id,
+    policyProgress: state.policy.path?.length ? state.policy.pathIndex / state.policy.path.length : 0,
   });
 }
 
@@ -341,7 +353,7 @@ function updateTelemetry() {
   const atLimit = activeArms().some((armState) => armState.q.some((value, index) => Math.abs(value) >= jointLimitOf(index) - 1e-6));
   const actualSafety = evaluateCellSafety(activeArms().map(({ q, arm }) => ({ q, arm })), compiled.environment.safety);
   const reason = state.safetyNotice || actualSafety.reason;
-  const safetyCopy = { floor: 'Blocked at floor', workspace: 'Blocked at floor edge', collision: 'Blocked arm collision' };
+  const safetyCopy = { floor: 'Blocked at floor', workspace: 'Blocked at floor edge', collision: 'Blocked arm collision', rate: 'Blocked joint-step jump' };
   $('#safety-state').textContent = reason ? safetyCopy[reason] : atLimit ? 'At a joint limit' : 'Within floor + collision limits';
   $('#safety-state').style.color = reason || atLimit ? '#b04a24' : '#45861a';
 }
@@ -370,7 +382,13 @@ function replanArms() {
     const plans = [];
     let error = 0;
     for (const index of order) {
-      const otherPoses = plans.map((plan, otherIndex) => (plan ? { q: plan.q, arm: arms[otherIndex].arm } : null)).filter(Boolean);
+      // `plans` is deliberately sparse while an order is being evaluated.
+      // Keep each solved pose paired with its original arm index: in the
+      // B-then-A order, treating B's pose as A (or as B's own obstacle) made
+      // the alternate bimanual plan nondeterministic.
+      const otherPoses = plans.flatMap((plan, otherIndex) => (
+        plan && otherIndex !== index ? [{ q: plan.q, arm: arms[otherIndex].arm }] : []
+      ));
       plans[index] = solveInverseKinematics(arms[index].goal, arms[index].arm, compiled.environment.safety, otherPoses);
       error += plans[index].distance;
     }
@@ -457,6 +475,10 @@ async function mountViewport3D() {
       workspace: compiled.environment.safety,
       onGoalPick: (point) => setGoalFromScene(point),
       onGoalHeight: setGoalHeight,
+      onClothFrame: ({ frames, captured, settled }) => {
+        if (state.currentWorkflow.id !== 'fold') return;
+        $('#cloth-status').textContent = `Cloth frames ${frames} / 120 · ${captured.map((value, index) => `${index ? 'B' : 'A'} ${value ? 'held' : 'free'}`).join(' · ')}${settled ? ' · settled' : ''}`;
+      },
     });
     viewport.instance = instance;
     pushViewportState();
@@ -577,6 +599,17 @@ function loadWorkflow(id, { scroll = false } = {}) {
   const workflow = state.currentWorkflow;
   state.armCount = workflow.arms || 1;
   state.activeArm = 0;
+  state.policy.path = null;
+  state.policy.pathIndex = 0;
+  state.policy.accumulator = 0;
+  state.policy.budget = workflow.horizon_steps;
+  state.policy.loop = workflow.id === 'fold';
+  $('#policy-loop').checked = state.policy.loop;
+  $('#policy-budget').value = state.policy.budget;
+  $('#policy-budget-value').textContent = state.policy.budget;
+  $('#policy-profile').textContent = workflow.id === 'fold' ? 'Towel-fold specialist' : 'Geometric policy';
+  setHidden($('#cloth-status'), workflow.id !== 'fold');
+  $('#cloth-status').textContent = 'Cloth frames 0 / 120';
   setArmGoal(state.arms[0], [...workflow.goal, workflow.goal_height], { replan: false });
   setArmGoal(state.arms[1], [...(workflow.goal_b || workflow.goal), workflow.goal_height], { replan: false });
   replanArms();
@@ -604,7 +637,7 @@ const HALT_COPY = {
   [HALT.REACHED]: () => `Halted · goal reached in ${state.policy.steps} steps`,
   [HALT.BUDGET]: () => `Halted · step budget exhausted at ${state.policy.steps}`,
   [HALT.OPERATOR]: () => `Halted by operator at step ${state.policy.steps}`,
-  [HALT.SAFETY]: () => `Halted · floor or collision boundary at step ${state.policy.steps}`,
+  [HALT.SAFETY]: () => `Halted · safety boundary at step ${state.policy.steps}`,
 };
 
 function renderHaltState() {
@@ -618,6 +651,12 @@ function renderHaltState() {
 function policyStep() {
   const next = state.policy.path?.[state.policy.pathIndex];
   if (!next) return HALT.SAFETY;
+  // Validate a live frame before state changes. This defense-in-depth check
+  // prevents a malformed path from teleporting an arm between safe poses.
+  const exceedsJointStep = next.some((q, index) => q.some((value, joint) => (
+    Math.abs(value - state.arms[index].q[joint]) > state.arms[index].arm.maxActionDelta + 1e-9
+  )));
+  if (exceedsJointStep) { state.safetyNotice = 'rate'; return HALT.SAFETY; }
   const nextSafety = evaluateCellSafety(next.map((q, index) => ({ q, arm: state.arms[index].arm })), compiled.environment.safety);
   if (!nextSafety.safe) { state.safetyNotice = nextSafety.reason; return HALT.SAFETY; }
   let error = 0;
@@ -636,7 +675,7 @@ function policyStep() {
   return haltState({ error, steps: state.policy.steps, budget: policyBudget() });
 }
 
-const policyBudget = () => Math.min(state.currentWorkflow.horizon_steps || compiled.environment.max_steps, compiled.environment.max_steps);
+const policyBudget = () => clamp(Math.round(state.policy.budget), 1, 400);
 
 /**
  * Advance the run by `speed` control steps per animation frame.
@@ -663,7 +702,8 @@ function settlePolicy(status) {
   state.policy.frame = null;
   state.policy.status = status;
   renderHaltState();
-  if (status === HALT.REACHED && state.policy.loop) {
+  // Only a budget halt may retry. A safety halt is always terminal.
+  if (status === HALT.BUDGET && state.policy.loop) {
     state.policy.restart = setTimeout(() => { state.policy.restart = null; resetArms(); startPolicy(); }, 700);
   }
 }
@@ -705,6 +745,9 @@ function resetArms() {
   }
   state.step = 0;
   state.safetyNotice = null;
+  state.policy.path = null;
+  state.policy.pathIndex = 0;
+  state.policy.accumulator = 0;
   syncSliders();
   updateArms();
 }
@@ -753,10 +796,14 @@ function installListeners() {
     state.policy.speed = Number(event.target.value);
     $('#policy-speed-value').textContent = `${fmt(state.policy.speed)}×`;
   });
+  $('#policy-budget').addEventListener('input', (event) => {
+    state.policy.budget = Number(event.target.value);
+    $('#policy-budget-value').textContent = state.policy.budget;
+  });
   $('#policy-loop').addEventListener('change', (event) => {
     state.policy.loop = event.target.checked;
     if (!state.policy.loop) { clearTimeout(state.policy.restart); state.policy.restart = null; }
-    else if (state.policy.status === HALT.REACHED) settlePolicy(HALT.REACHED);
+    else if (state.policy.status === HALT.BUDGET) settlePolicy(HALT.BUDGET);
   });
   $('#reset').addEventListener('click', () => { haltPolicy(HALT.IDLE, { silent: true }); resetArms(); });
   $('#record').addEventListener('click', () => {
@@ -796,7 +843,9 @@ function makeSliders() {
     const armState = controlledArm();
     const previous = armState.q[index];
     const candidate = [...armState.q];
-    candidate[index] = Number(input.value);
+    // A range input can jump from one end to the other. Apply the same
+    // per-step cap as the policy, so manual operation cannot teleport either.
+    candidate[index] = previous + clamp(Number(input.value) - previous, -armState.arm.maxActionDelta, armState.arm.maxActionDelta);
     const candidatePoses = activeArms().map((item) => ({ q: item === armState ? candidate : item.q, arm: item.arm }));
     const safety = evaluateCellSafety(candidatePoses, compiled.environment.safety);
     if (!safety.safe) {
@@ -810,7 +859,7 @@ function makeSliders() {
     armState.lastAction = Array(6).fill(0);
     armState.lastAction[index] = clamp(armState.q[index] - previous, -ARM.maxActionDelta, ARM.maxActionDelta);
     state.step += 1;
-    input.nextElementSibling.value = fmt(armState.q[index]);
+    syncSliders();
     updateArms();
     addTransition();
   }));

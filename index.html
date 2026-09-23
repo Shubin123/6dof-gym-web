@@ -49,8 +49,11 @@
             <p id="viewport-hint" class="viewport-hint">Click anywhere in the scene to move the nearest arm's goal.</p>
             <div class="policy-bar">
               <span id="halt-state" class="halt-state idle">Idle · policy not running</span>
+              <span id="policy-profile" class="policy-profile">Geometric policy</span>
+              <span id="cloth-status" class="cloth-status" hidden>Cloth frames 0 / 120</span>
+              <label class="policy-budget">Step budget<input id="policy-budget" type="range" min="1" max="400" step="1" value="90" aria-label="Maximum policy control steps" /><output id="policy-budget-value">90</output></label>
               <label class="policy-speed">Speed<input id="policy-speed" type="range" min="0.25" max="8" step="0.25" value="1" aria-label="Policy playback speed" /><output id="policy-speed-value">1.00×</output></label>
-              <label class="policy-loop"><input id="policy-loop" type="checkbox" /> Loop</label>
+              <label class="policy-loop"><input id="policy-loop" type="checkbox" /> Retry until goal</label>
             </div>
             <div class="scene-controls"><button id="reset" class="icon-button">↺ Reset</button><button id="run-policy" class="button compact primary">Run demo policy</button><button id="record" class="icon-button">● Record</button></div>
           </section>
@@ -62,6 +65,7 @@
               <div id="arm-switch" class="arm-switch" role="group" aria-label="Arm under manual control" hidden></div>
               <div id="sliders" class="sliders"></div>
               <div class="safety"><span>Safety envelope</span><b id="safety-state">Within limits</b></div>
+              <p class="safety-policy"><b>Safety rules</b> Every manual move and policy frame must stay above the floor, inside the table boundary, clear of the other arm, and within the joint-step cap. A violation is rejected and the policy halts.</p>
             </div>
             <div class="tab-content" id="telemetry">
               <div class="metric"><span>Distance to goal</span><strong id="distance">—</strong></div><div class="metric"><span>Tool height</span><strong id="tool-height">—</strong></div><div class="metric"><span>Reward</span><strong id="reward">—</strong></div><div class="metric"><span>Episode step</span><strong id="step">0 / 200</strong></div>

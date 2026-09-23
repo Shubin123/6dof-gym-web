@@ -42,9 +42,13 @@
 .policy-bar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:12px 2px 0;border-top:1px solid #1e2836;margin-top:11px}
 .halt-state{font:10px var(--mono);letter-spacing:.4px;padding:5px 10px;border:1px solid #334054;color:#9ba6b7}
 .halt-state.running{border-color:#c9fb5d;color:#c9fb5d}.halt-state.reached{border-color:#79c845;color:#a9e87a}.halt-state.budget{border-color:#c08a3a;color:#ffbd4a}.halt-state.operator,.halt-state.safety{border-color:#8d5a4a;color:#e0a08c}
-.policy-speed{display:flex;align-items:center;gap:9px;font:10px var(--mono);color:#9ba6b7;margin-left:auto}
+.policy-profile{font:10px var(--mono);color:#b8c6d8}.policy-profile::before{content:'●';color:#c9fb5d;margin-right:5px}
+.cloth-status{font:10px var(--mono);color:#a6e6ef}
+.policy-budget,.policy-speed{display:flex;align-items:center;gap:9px;font:10px var(--mono);color:#9ba6b7}
+.policy-budget{margin-left:auto}.policy-budget input{width:92px;accent-color:#ffbd4a}.policy-budget output{min-width:24px;text-align:right;color:#ffdf9d}
 .policy-speed input{width:120px;accent-color:#c9fb5d}.policy-speed output{min-width:44px;text-align:right;color:#dfe6ee}
 .policy-loop{display:flex;align-items:center;gap:6px;font:10px var(--mono);color:#9ba6b7;cursor:pointer}.policy-loop input{accent-color:#c9fb5d}
+.safety-policy{margin:0;padding:12px 0 0;border-top:1px solid #dedad2;font:10px/1.5 var(--mono);color:#637084}.safety-policy b{display:block;color:#26364c;margin-bottom:3px}
 .arm-switch{display:flex;gap:6px;margin:0 0 14px}
 .arm-chip{flex:1;border:1px solid #cbc6be;background:#fffdfa;font:11px var(--mono);padding:8px;cursor:pointer;transition:.15s}
 .arm-chip:hover{border-color:var(--ink)}.arm-chip.active{background:var(--ink);border-color:var(--ink);color:var(--paper)}
@@ -53,4 +57,4 @@
 .goal-z{font:9px var(--mono);fill:#ffbd4a;letter-spacing:.4px}
 .arm[data-arm="B"] .arm-link{stroke:#69d2df}.arm[data-arm="B"] .joint{stroke:#a6e6ef}.arm[data-arm="B"] .joint.small{fill:#69d2df}.arm[data-arm="B"] .grip{stroke:#a6e6ef}
 .goal[data-arm="B"] .cube{fill:#69d2df;stroke:#bfeef4}.goal[data-arm="B"] .goal-ring{stroke:#69d2df;fill:#69d2df18}.goal[data-arm="B"] .goal-cross{stroke:#a6e6ef}.goal[data-arm="B"] .goal-z{fill:#69d2df}
-@media(max-width:850px){.policy-speed{margin-left:0}.policy-speed input{width:90px}}
+@media(max-width:850px){.policy-budget{margin-left:0}.policy-speed input{width:90px}}

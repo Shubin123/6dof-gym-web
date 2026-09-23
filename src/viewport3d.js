@@ -173,7 +173,34 @@ function makeGoal(mirrored) {
   return { group, cube, beam, grip, handles, handleMaterial };
 }
 
-export function createViewport3D(container, { workspace, onGoalPick, onGoalHeight }) {
+/** A small, gripper-constrained spring cloth for the task-07 demonstration. */
+function makeCloth() {
+  const columns = 12;
+  const rows = 10;
+  const geometry = new THREE.PlaneGeometry(1.5, 1.2, columns, rows);
+  const rest = Float32Array.from(geometry.attributes.position.array);
+  const velocity = new Float32Array(rest.length);
+  const material = new THREE.MeshStandardMaterial({
+    color: 0x49c7e8,
+    emissive: 0x0b4560,
+    emissiveIntensity: 0.55,
+    roughness: 0.92,
+    side: THREE.DoubleSide,
+    transparent: true,
+    opacity: 0.94,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  const grid = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: 0xe1f9ff, wireframe: true, transparent: true, opacity: 0.45 }));
+  const group = new THREE.Group();
+  // Plane geometry starts in XY; local Z is the physical lift after rotation.
+  group.rotation.x = -Math.PI / 2;
+  group.position.copy(toWorld([325, 240, 4]));
+  group.add(mesh, grid);
+  group.visible = false;
+  return { group, geometry, rest, velocity, columns, rows, captured: [false, false], taskId: null, frames: [], settled: false };
+}
+
+export function createViewport3D(container, { workspace, onGoalPick, onGoalHeight, onClothFrame }) {
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
@@ -218,6 +245,15 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     const goal = makeGoal(arm.mirror);
     scene.add(rig.group, goal.group);
     return { ...rig, goal };
+  });
+  const cloth = makeCloth();
+  scene.add(cloth.group);
+  const motionLines = rigs.map((rig) => {
+    const geometry = new THREE.BufferGeometry();
+    const line = new THREE.Line(geometry, new THREE.LineDashedMaterial({ color: rig.arm.mirror ? COLORS.linkB : COLORS.linkAlt, dashSize: 0.12, gapSize: 0.08, transparent: true, opacity: 0.8 }));
+    line.visible = false;
+    scene.add(line);
+    return line;
   });
 
   const raycaster = new THREE.Raycaster();
@@ -333,8 +369,91 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
   observer.observe(container);
   resize();
 
-  let current = { arms: [] };
+  let current = { arms: [], taskId: null, policyProgress: 0 };
   let frame = null;
+
+  function layoutCloth() {
+    cloth.group.visible = current.taskId === 'fold';
+    if (!cloth.group.visible) {
+      cloth.taskId = null;
+      return;
+    }
+    if (cloth.taskId !== current.taskId) {
+      cloth.taskId = current.taskId;
+      cloth.captured = [false, false];
+      cloth.velocity.fill(0);
+      cloth.frames = [];
+      cloth.settled = false;
+      cloth.geometry.attributes.position.array.set(cloth.rest);
+    }
+
+    // The two front corners can only be captured when an actual tool reaches
+    // them. No progress-based shape morphing: the mesh moves from gravity,
+    // springs, a table plane, and those explicit gripper constraints.
+    const width = cloth.columns + 1;
+    const anchors = [0, cloth.columns];
+    const targets = [rigs[0]?.tool, rigs[1]?.tool].map((tool) => tool?.getWorldPosition(new THREE.Vector3()));
+    const positions = cloth.geometry.attributes.position.array;
+    const localTargets = targets.map((target) => target ? cloth.group.worldToLocal(target.clone()) : null);
+    anchors.forEach((vertex, armIndex) => {
+      if (!localTargets[armIndex]) return;
+      const offset = vertex * 3;
+      const distanceToCorner = Math.hypot(
+        positions[offset] - localTargets[armIndex].x,
+        positions[offset + 1] - localTargets[armIndex].y,
+        positions[offset + 2] - localTargets[armIndex].z,
+      );
+      if (distanceToCorner < 0.36) cloth.captured[armIndex] = true;
+    });
+
+    for (let offset = 0; offset < positions.length; offset += 3) {
+      const pinned = anchors.some((vertex, index) => vertex * 3 === offset && cloth.captured[index]);
+      if (pinned) continue;
+      cloth.velocity[offset + 2] = (cloth.velocity[offset + 2] - 0.0018) * 0.985;
+      positions[offset + 2] = Math.max(0.018, positions[offset + 2] + cloth.velocity[offset + 2]);
+    }
+
+    const relax = (first, second) => {
+      const a = first * 3; const b = second * 3;
+      const dx = positions[b] - positions[a]; const dy = positions[b + 1] - positions[a + 1]; const dz = positions[b + 2] - positions[a + 2];
+      const length = Math.hypot(dx, dy, dz) || 1;
+      const rx = cloth.rest[b] - cloth.rest[a]; const ry = cloth.rest[b + 1] - cloth.rest[a + 1];
+      const restLength = Math.hypot(rx, ry) || 1;
+      const correction = (length - restLength) / length * 0.5;
+      const firstPinned = anchors.some((vertex, index) => vertex === first && cloth.captured[index]);
+      const secondPinned = anchors.some((vertex, index) => vertex === second && cloth.captured[index]);
+      if (!firstPinned) { positions[a] += dx * correction; positions[a + 1] += dy * correction; positions[a + 2] += dz * correction; }
+      if (!secondPinned) { positions[b] -= dx * correction; positions[b + 1] -= dy * correction; positions[b + 2] -= dz * correction; }
+    };
+    for (let iteration = 0; iteration < 4; iteration += 1) {
+      for (let row = 0; row <= cloth.rows; row += 1) for (let column = 0; column <= cloth.columns; column += 1) {
+        const vertex = row * width + column;
+        if (column < cloth.columns) relax(vertex, vertex + 1);
+        if (row < cloth.rows) relax(vertex, vertex + width);
+      }
+      anchors.forEach((vertex, armIndex) => {
+        if (!cloth.captured[armIndex] || !localTargets[armIndex]) return;
+        const offset = vertex * 3;
+        positions[offset] = localTargets[armIndex].x;
+        positions[offset + 1] = localTargets[armIndex].y;
+        positions[offset + 2] = Math.max(0.018, localTargets[armIndex].z);
+      });
+    }
+    cloth.geometry.attributes.position.needsUpdate = true;
+    cloth.geometry.computeVertexNormals();
+    // Keep a bounded frame buffer for observing actual cloth motion and
+    // determine settling from the oldest/newest buffered mesh snapshots.
+    cloth.frames.push(Float32Array.from(positions));
+    if (cloth.frames.length > 120) cloth.frames.shift();
+    if (cloth.frames.length === 120) {
+      const oldest = cloth.frames[0];
+      const newest = cloth.frames.at(-1);
+      let displacement = 0;
+      for (let index = 0; index < newest.length; index += 3) displacement += Math.hypot(newest[index] - oldest[index], newest[index + 1] - oldest[index + 1], newest[index + 2] - oldest[index + 2]);
+      cloth.settled = displacement / (newest.length / 3) < 0.002;
+    }
+    onClothFrame?.({ frames: cloth.frames.length, captured: [...cloth.captured], settled: cloth.settled });
+  }
 
   function layoutArm(rig, armState) {
     const { points, forward } = forwardKinematics(armState.q, rig.arm);
@@ -365,6 +484,14 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     rig.goal.handles.forEach((handle, index) => { handle.position.y = goal.y + (index === 0 ? 0.24 : -0.24); });
     rig.goal.beam.scale.y = Math.max(goal.y, 0.001);
     rig.goal.beam.position.y = goal.y / 2;
+
+    const controlA = tip.clone().lerp(goal, 0.35).add(new THREE.Vector3(0, 0.7, 0));
+    const controlB = tip.clone().lerp(goal, 0.7).add(new THREE.Vector3(0, 0.7, 0));
+    const curve = new THREE.CubicBezierCurve3(tip, controlA, controlB, goal);
+    const motionLine = motionLines[rig.arm.id === 'B' ? 1 : 0];
+    motionLine.geometry.setFromPoints(curve.getPoints(32));
+    motionLine.computeLineDistances();
+    motionLine.visible = true;
   }
 
   function layout() {
@@ -373,8 +500,10 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
       const visible = Boolean(armState);
       rig.group.visible = visible;
       rig.goal.group.visible = visible;
+      motionLines[index].visible = visible;
       if (visible) layoutArm(rig, armState);
     });
+    layoutCloth();
   }
 
   function loop() {

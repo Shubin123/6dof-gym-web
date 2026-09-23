@@ -1,5 +1,6 @@
 # ArmLab — 6‑DOF Gym
-protype link: [https://shubin123.github.io/6dof-gym-web/] 
+
+Prototype: [https://shubin123.github.io/6dof-gym-web/](https://shubin123.github.io/6dof-gym-web/)
 
 A static, interactive web prototype for designing and validating 6-DOF arm tasks. It demonstrates a task contract, a library of fully specified examples, browser episode recording, curated source data, and an explicit policy-selection ladder.
 
@@ -16,6 +17,8 @@ Run the data-contract checks and make the production bundle with:
 npm test
 npm run build
 ```
+
+For a hands-on walkthrough, control reference, episode format, and browser troubleshooting, see [the demo guide](docs/DEMO_GUIDE.md).
 
 ## What is real in this prototype
 
@@ -43,7 +46,9 @@ Every example is reachable in the browser lab: `npm test` asserts that each goal
 
 ## Safety envelope
 
-The browser controller validates the entire arm geometry, not only its goal marker. Manual moves, imported replays, and demo-policy frames are rejected before a link can pass below the table, cross the marked floor edge, or enter the other arm's configured clearance. Bimanual policy runs use deterministic collision-checked paths and halt in an explicit safety state if no valid route exists.
+The browser controller validates the entire arm geometry, not only its goal marker. Manual moves, imported replays, and demo-policy frames are rejected before a link can pass below the floor, cross the marked table edge, or enter the other arm's configured clearance. Both manual moves and policy frames are capped to the configured per-joint delta, so the arm cannot teleport between safe poses. Bimanual policy runs use deterministic collision-checked paths and halt in an explicit safety state if no valid route exists.
+
+The safety policy is: (1) no link below the floor plane, (2) no link beyond the table workspace, (3) no inter-arm clearance violation, and (4) no joint jump above the per-frame limit. The controller checks the whole next frame before changing any arm state; any violation leaves the current safe pose intact and halts the policy with the reason shown in the Safety envelope.
 
 This remains a geometric browser simulation, not a certified collision system or hardware controller. Physical deployments still require robot-specific meshes, self-collision checks, torque and velocity limits, a watchdog, dead-man control, and an independent e-stop.
 
@@ -64,7 +69,7 @@ Tasks that genuinely need two grippers declare `arms: 2` and a second goal: towe
 The lab stage renders the same arm two ways, switched by the **2D / 3D** control:
 
 - **2D** — the top-down SVG scene. Click anywhere to move the nearest arm's goal. Height shows as a cast shadow, as joint scale, and as a readout, because a top-down view cannot show it directly.
-- **3D** — a three.js viewport. Drag to orbit, scroll to zoom, click the floor to move a goal, and **drag a cube up or down to set its height**. This is where height is literal: the column, the arc of the elbow, and the object floating above its floor marker are all real coordinates.
+- **3D** — a three.js viewport. Drag to orbit, scroll to zoom, click the floor to move a goal, and **drag a cube up or down to set its height**. Dashed cubic Bézier lines preview the tool motion between its current pose and goal; they are visual guides only, while the actual arm moves through safety-checked, joint-limited frames. This is where height is literal: the column, the arc of the elbow, and the object floating above its floor marker are all real coordinates.
 
 Hovering a cube raises an arrow above and below it and switches the cursor; grabbing one takes hold of the point you clicked, so the object tracks the pointer without jumping, and the orbit camera stands still for the duration of the drag. Dragging a cube also makes that arm the one the joint sliders drive, and the **Goal Z** slider follows along. The solver runs once on release rather than on every pointer move, which keeps a full IK search out of the drag loop.
 
@@ -76,7 +81,12 @@ The demo planner is a transparent geometric controller, and a run is bounded rat
 
 - **Halt state.** Every run ends in a named state — *goal reached* with the step count, *step budget exhausted*, *safety boundary*, or *halted by operator* — so a success is never confused with a run that simply gave up. The run button becomes a halt button while a policy is moving.
 - **Speed.** A slider advances the run between 0.25× and 8× control steps per frame: slow enough to watch a correction, fast enough to skip a long reach.
-- **Loop.** With loop on, a successful run returns the arms to the home pose and repeats, which is how you watch a task for repeatability rather than for one lucky episode.
+- **Step budget.** The **Step budget** slider sets the maximum number of control steps (1–400). Each scenario loads its recommended horizon, including 200 for Towel fold; raise it to inspect a longer run or lower it to test bounded failure handling.
+- **Retry until goal.** When enabled, a run that exhausts its step budget returns to home and retries; a reached goal stops the run, and a safety halt is never retried automatically. Scenario 07 enables this by default.
+
+### Scenario 07: Towel fold specialist
+
+Scenario 07 now identifies its task-specific browser controller and renders a spring-cloth approximation in the 3-D viewport. The towel responds to gravity, table contact, structural springs, and only attaches to a corner once the corresponding gripper reaches it; it is not morphed merely because a progress counter advances. The visible 120-frame rolling buffer reports its captured corners and whether the mesh has settled. It remains an intentionally limited browser approximation: it does not model self-collision, friction, material anisotropy, or real gripper contact. Training a learned policy would require recorded demonstrations, camera observations, a training runtime, and evaluation data that this static repository does not include.
 
 ## Model and data direction
 
