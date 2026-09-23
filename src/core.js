@@ -466,7 +466,7 @@ let cachedFoldPath = null;
  *
  * Every frame is validated against floor, workspace, and inter-arm clearance limits.
  */
-export function planTowelFoldMotion(poses, safety = {}) {
+export function planTowelFoldMotion(poses, safety = {}, profile = {}) {
   if (poses.length < 2) return null;
   const armA = poses[0].arm || ARM;
   const armB = poses[1].arm || ARM_B;
@@ -497,7 +497,11 @@ export function planTowelFoldMotion(poses, safety = {}) {
   // Lift while Arm A pins, then retract Arm A before the folded edge crosses
   // the pin. Keeping both tools at the fold line violates arm clearance and
   // leaves the towel loose at x≈300 instead of placed on the pinned edge.
-  const liftWaypoint = [380, 180, 45];
+  const liftHeight = profile.liftHeight ?? 45;
+  const crossHeight = profile.crossHeight ?? 38;
+  const placeHeight = profile.placeHeight ?? 6;
+  const settleFrames = profile.settleFrames ?? 4;
+  const liftWaypoint = [380, 180, liftHeight];
   const liftPlan = solveInverseKinematics(liftWaypoint, armB, safety, [{ q: curA, arm: armA }]);
   if (!liftPlan?.safety?.safe) return null;
   const liftPath = planSafeMotion(curB, liftPlan.q, armB, safety, [{ q: curA, arm: armA }]);
@@ -518,12 +522,12 @@ export function planTowelFoldMotion(poses, safety = {}) {
   curB = retract.frames.at(-1)[1];
 
   const foldWaypoints = [
-    [310, 180, 45],
-    [270, 180, 38],
+    [310, 180, liftHeight],
+    [270, 180, crossHeight],
     // Set the delivered edge just above the table (and its lower layer), not
     // at a hovering tool height. The thickness barrier supplies the final
     // separation between the two towel layers.
-    [250, 180, 6],
+    [250, 180, placeHeight],
   ];
   for (const wp of foldWaypoints) {
     const planWp = solveInverseKinematics(wp, armB, safety, [{ q: curA, arm: armA }]);
@@ -539,7 +543,7 @@ export function planTowelFoldMotion(poses, safety = {}) {
 
   // A short settle phase lets the PBD cloth relax without exceeding the
   // fold workflow's 400-step operating budget.
-  for (let h = 0; h < 4; h += 1) {
+  for (let h = 0; h < settleFrames; h += 1) {
     frames.push([[...curA], [...curB]]);
   }
 

@@ -44,7 +44,13 @@ The 3-D viewport is loaded only after selecting **3D**. It needs a browser with 
 
 **Towel fold**, **Table reset**, and **Safe handoff** use both arms. The **Arm A / Arm B** switch selects which joint sliders and Goal Z control operate. The planner evaluates both safe arm orders and maintains the configured inter-arm clearance throughout the path.
 
-Scenario 07, **Towel fold**, displays a gripper-constrained spring cloth in 3-D. The towel falls onto a frictional table, captures only when a tool reaches a corner, preserves layer thickness during cross-over, and records a rolling 120-frame mesh history for the loading slider. Arm A pins then releases its corner; that contact remains table-pinned while Arm B lifts, crosses, and lowers the opposite edge onto it. This is a bounded Position-Based Dynamics illustration—not a substitute for calibrated material parameters, perception, demonstrations, or an external training runtime—but it follows the displayed contact and constraint rules instead of animating the towel by policy progress alone.
+Scenario 07, **Towel fold**, displays a gripper-constrained spring cloth in 3-D and an outlined **FOLDED TARGET** in both views. The towel falls onto a frictional table, captures only when a tool reaches a corner, preserves layer thickness during cross-over, and records a rolling 120-frame mesh history for the loading slider. Arm A pins then releases its corner; that contact remains table-pinned while Arm B lifts, crosses, and lowers the opposite edge onto it. Both views consume the same control-rate cloth snapshots, so changing viewport cannot change the simulated fold.
+
+## Task-specific policy recipes
+
+`src/task-policies.js` is the extension point for a new use case. A recipe declares a label, a safe warm-start profile, and weighted intermediate rewards. Scenario 07 uses five stages: secure both corners, pin/release the left edge, cross the fold line, place on the target, and settle below the stretch threshold. The browser runs a deterministic synthetic cloth calibration before planning, but every generated frame still goes through IK, floor, workspace, inter-arm, and joint-step checks. It is a pseudo-training seam for task development—not a claim that the browser has trained a deployable neural policy.
+
+To add a task-specific policy, add its recipe and optional profile in `src/task-policies.js`, then route the task planner to consume that profile. This keeps task optimisation local: tune the relevant stage weights and motion parameters without weakening the shared safety envelope.
 
 ## Recording and replay
 

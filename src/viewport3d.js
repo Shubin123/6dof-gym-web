@@ -195,6 +195,14 @@ function makeCloth() {
     new THREE.MeshBasicMaterial({ color: 0xe1f9ff, wireframe: true, transparent: true, opacity: 0.35 }),
   );
   const group = new THREE.Group();
+  // The translucent rectangle is the observable success reference: the
+  // right half of the towel should land over this left-side footprint.
+  const foldTarget = new THREE.Mesh(
+    new THREE.PlaneGeometry(simulator.width / 2, simulator.height),
+    new THREE.MeshBasicMaterial({ color: COLORS.linkAlt, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false }),
+  );
+  foldTarget.position.set(-simulator.width / 4, 0, simulator.thickness * 1.5);
+  group.add(foldTarget);
   group.rotation.x = -Math.PI / 2;
   group.position.copy(toWorld([325, 240, 4]));
   group.add(mesh, grid);
@@ -371,65 +379,29 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
   observer.observe(container);
   resize();
 
-  let current = { arms: [], taskId: null, policyProgress: 0 };
+  let current = { arms: [], taskId: null, policyProgress: 0, clothSnapshot: null };
   let frame = null;
-
-  // The simulator integrates gravity and damping as a fixed per-step amount,
-  // not scaled by elapsed time. Stepping it once per rendered frame ties its
-  // speed to the display's refresh rate: a 120Hz+ monitor injects gravity
-  // twice as fast as a 60Hz one, which outruns the PBD relaxation (a fixed 6
-  // iterations per step) and shows up as visible overstretching that the 2D
-  // view — stepped only on discrete state updates, not on every frame — never
-  // hits. Running physics on its own fixed-rate accumulator, independent of
-  // the render loop, keeps both views mechanically identical.
-  const CLOTH_STEP_MS = 1000 / 60;
-  const CLOTH_STEP_MAX_CATCHUP_MS = CLOTH_STEP_MS * 5;
-  let clothAccumulatorMs = 0;
-  let lastClothStepTime = null;
 
   function layoutCloth() {
     cloth.group.visible = current.taskId === 'fold';
     if (!cloth.group.visible) {
       cloth.taskId = null;
-      lastClothStepTime = null;
-      clothAccumulatorMs = 0;
       return;
     }
     if (cloth.taskId !== current.taskId) {
       cloth.taskId = current.taskId;
       cloth.simulator.reset();
-      lastClothStepTime = null;
-      clothAccumulatorMs = 0;
     }
 
-    const targets = [rigs[0]?.tool, rigs[1]?.tool].map((tool) => tool?.getWorldPosition(new THREE.Vector3()));
-    const localTargets = targets.map((target) => (target ? cloth.group.worldToLocal(target.clone()) : null));
-
-    const now = performance.now();
-    if (lastClothStepTime === null) lastClothStepTime = now;
-    clothAccumulatorMs = Math.min(clothAccumulatorMs + (now - lastClothStepTime), CLOTH_STEP_MAX_CATCHUP_MS);
-    lastClothStepTime = now;
-
-    let stepped = false;
-    while (clothAccumulatorMs >= CLOTH_STEP_MS) {
-      cloth.simulator.step({ targetA: localTargets[0], targetB: localTargets[1] });
-      clothAccumulatorMs -= CLOTH_STEP_MS;
-      stepped = true;
-    }
-    if (!stepped) return;
+    // Physics is advanced in main.js at the accepted control rate. Rendering
+    // only consumes its immutable snapshot, keeping both viewport modes and
+    // the timeline scrubber aligned frame-for-frame.
+    if (!current.clothSnapshot) return;
+    cloth.simulator.restore(current.clothSnapshot);
 
     cloth.geometry.attributes.position.array.set(cloth.simulator.positions);
     cloth.geometry.attributes.position.needsUpdate = true;
     cloth.geometry.computeVertexNormals();
-
-    const metrics = cloth.simulator.getFoldMetrics();
-    onClothFrame?.({
-      frames: cloth.simulator.history.length,
-      captured: [...cloth.simulator.captured],
-      settled: cloth.simulator.settled,
-      foldMetrics: metrics,
-      snapshot: cloth.simulator.snapshot(),
-    });
   }
 
   function layoutArm(rig, armState) {

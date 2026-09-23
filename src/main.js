@@ -3,6 +3,7 @@ import compiled from '../data/compiled.json';
 import registry from '../data/sources.json';
 import { ARM, ARM_B, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, reduceSafeCellMotion, solveInverseKinematics } from './core.js';
 import { ClothSimulator } from './cloth.js';
+import { bootstrapPolicy, policyRecipeFor, scoreTaskStages } from './task-policies.js';
 
 const $ = (selector) => document.querySelector(selector);
 const fmt = (value, digits = 2) => Number(value).toFixed(digits);
@@ -31,7 +32,7 @@ const state = {
   replaying: false,
   familyFilter: 'all',
   modelFilter: 'all',
-  policy: { status: HALT.IDLE, steps: 0, speed: 1, budget: compiled.workflows[0].horizon_steps, loop: false, frame: null, accumulator: 0, restart: null, path: null, pathIndex: 0, solveStartedAt: null, planning: false, planningToken: 0, planningPhase: null },
+  policy: { status: HALT.IDLE, steps: 0, speed: 1, budget: compiled.workflows[0].horizon_steps, loop: false, frame: null, accumulator: 0, restart: null, path: null, pathIndex: 0, solveStartedAt: null, planning: false, planningToken: 0, planningPhase: null, stageScore: null },
   safetyNotice: null,
   voice: { dataUrl: null, mimeType: null, transcript: '', audioUrl: null, recorder: null, recognition: null, stream: null, bytes: 0, captureTimeout: null },
   frameHistory: [],
@@ -321,30 +322,40 @@ function updateCloth2D() {
   setHidden(clothGroup, !isFold);
   if (!isFold) return;
 
-  const tips = activeArms().map((armState) => {
-    const { points } = forwardKinematics(armState.q, armState.arm);
-    const tip = points.at(-1);
-    return {
-      x: (tip[0] - 325) / 100,
-      y: (tip[1] - 240) / 100,
-      z: (tip[2] || 0) / 100,
-    };
-  });
-
-  state.cloth2d.step({
-    targetA: tips[0],
-    targetB: tips[1],
-  });
-
   const { basePoints, creasePoints } = state.cloth2d.get2DPolygons([325, 240], 100);
   const pathString = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0], 1)} ${fmt(p[1], 1)}`).join(' ') + ' Z';
   const creaseString = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0], 1)} ${fmt(p[1], 1)}`).join(' ');
 
   clothGroup.innerHTML = `
+    <rect class="cloth-2d-target" x="250" y="180" width="75" height="120" rx="3" />
+    <text class="cloth-2d-target-label" x="287.5" y="318" text-anchor="middle">FOLDED TARGET</text>
     <path class="cloth-2d-base" d="${pathString(basePoints)}" />
     <path class="cloth-2d-crease" d="${creaseString(creasePoints)}" />
     <circle class="cloth-2d-pin" cx="${fmt(basePoints[0][0], 1)}" cy="${fmt(basePoints[0][1], 1)}" r="4" />
   `;
+}
+
+/**
+ * The cloth advances only with an accepted control frame. This is deliberately
+ * outside either renderer: 2-D and 3-D therefore display the same buffered
+ * physical state rather than integrating separate, refresh-rate-dependent
+ * towels.
+ */
+function advanceClothPhysics() {
+  if (state.currentWorkflow.id !== 'fold') return;
+  const targets = activeArms().map((armState) => {
+    const tip = tipOf(armState);
+    return { x: (tip[0] - 325) / 100, y: (tip[1] - 240) / 100, z: tip[2] / 100 };
+  });
+  // Two fixed PBD substeps per 25 Hz command give constraints time to settle
+  // between waypoints without making rendering cadence part of the dynamics.
+  for (let substep = 0; substep < 2; substep += 1) {
+    state.cloth2d.step({ targetA: targets[0], targetB: targets[1] });
+  }
+  const metrics = state.cloth2d.getFoldMetrics();
+  state.policy.stageScore = scoreTaskStages(state.currentWorkflow, { cloth: state.cloth2d, tips: activeArms().map(tipOf) });
+  const held = state.cloth2d.captured.map((value, index) => `${index ? 'B' : 'A'} ${value ? 'held' : 'free'}`).join(' · ');
+  $('#cloth-status').textContent = `Cloth frames ${state.cloth2d.history.length} / 120 · ${held} · ${state.policy.stageScore.stage} ${Math.round(state.policy.stageScore.reward * 100)}% · fold: ${fmt(metrics.frontDistance * 10, 1)} cm${metrics.folded ? ' · folded' : ''}`;
 }
 
 function updateTimelineSlider() {
@@ -501,6 +512,7 @@ function pushViewportState() {
     })),
     taskId: state.currentWorkflow.id,
     policyProgress: state.policy.path?.length ? state.policy.pathIndex / state.policy.path.length : 0,
+    clothSnapshot: state.cloth2d.snapshot(),
   });
 }
 
@@ -645,12 +657,6 @@ async function mountViewport3D() {
       workspace: compiled.environment.safety,
       onGoalPick: (point) => setGoalFromScene(point),
       onGoalHeight: setGoalHeight,
-      onClothFrame: ({ frames, captured, settled, foldMetrics }) => {
-        if (state.currentWorkflow.id !== 'fold') return;
-        const foldDist = foldMetrics ? ` · fold: ${fmt(foldMetrics.frontDistance * 10, 1)} cm` : '';
-        const foldStatus = foldMetrics?.folded ? ' · folded' : '';
-        $('#cloth-status').textContent = `Cloth frames ${frames} / 120 · ${captured.map((value, index) => `${index ? 'B' : 'A'} ${value ? 'held' : 'free'}`).join(' · ')}${settled ? ' · settled' : ''}${foldDist}${foldStatus}`;
-      },
     });
     viewport.instance = instance;
     pushViewportState();
@@ -806,7 +812,7 @@ function loadWorkflow(id, { scroll = false } = {}) {
   $('#policy-loop').checked = state.policy.loop;
   $('#policy-budget').value = state.policy.budget;
   $('#policy-budget-value').textContent = state.policy.budget;
-  $('#policy-profile').textContent = workflow.id === 'fold' ? 'Towel-fold specialist' : 'Geometric policy';
+  $('#policy-profile').textContent = policyRecipeFor(workflow).label;
   setHidden($('#cloth-status'), workflow.id !== 'fold');
   $('#cloth-status').textContent = 'Cloth frames 0 / 120';
   state.cloth2d?.reset();
@@ -877,10 +883,11 @@ function policyStep() {
   state.step += 1;
   state.policy.steps += 1;
   syncSliders();
+  advanceClothPhysics();
   updateArms();
   addTransition();
 
-  const clothSnap = viewport.instance?.getClothSnapshot?.() || state.cloth2d?.snapshot();
+  const clothSnap = state.cloth2d.snapshot();
   state.frameHistory[state.policy.steps] = {
     step: state.step,
     arms: activeArms().map((a) => ({ q: [...a.q], goal: [...a.goal], lastAction: [...a.lastAction] })),
@@ -888,6 +895,7 @@ function policyStep() {
   };
   updateTimelineSlider();
 
+  if (state.currentWorkflow.id === 'fold' && state.policy.stageScore?.complete) return HALT.REACHED;
   return haltState({ error, steps: state.policy.steps, budget: policyBudget() });
 }
 
@@ -950,9 +958,15 @@ async function runPolicyPlanning(token) {
   await yieldForSolverFeedback();
   if (!isCurrent()) return;
   if (state.currentWorkflow.id === 'fold' && activeArms().length === 2) {
+    state.policy.planningPhase = 'calibrating cloth-aware policy';
+    renderHaltState();
+    await yieldForSolverFeedback();
+    if (!isCurrent()) return;
+    const warmStart = bootstrapPolicy(state.currentWorkflow);
     motion = planTowelFoldMotion(
       poses,
       compiled.environment.safety,
+      warmStart.profile,
     );
   }
   if (!motion) {
@@ -991,7 +1005,7 @@ async function runPolicyPlanning(token) {
   state.policy.solveStartedAt = performance.now();
   state.timeline.scrubbing = false;
 
-  const clothSnap = viewport.instance?.getClothSnapshot?.() || state.cloth2d?.snapshot();
+  const clothSnap = state.cloth2d.snapshot();
   state.frameHistory = [{
     step: state.step,
     arms: activeArms().map((a) => ({ q: [...a.q], goal: [...a.goal], lastAction: [...a.lastAction] })),

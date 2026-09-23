@@ -87,6 +87,8 @@
 .cloth-2d-base{fill:#49c7e8;fill-opacity:.85;stroke:#69d2df;stroke-width:1.5;stroke-linejoin:round;filter:drop-shadow(2px 4px 6px rgba(0,0,0,.4))}
 .cloth-2d-crease{stroke:#e1f9ff;stroke-width:1.5;stroke-dasharray:3 3;fill:none;opacity:.8}
 .cloth-2d-pin{fill:#ffbd4a;stroke:#101620;stroke-width:1.5}
+.cloth-2d-target{fill:#c9fb5d18;stroke:#c9fb5d;stroke-width:1.5;stroke-dasharray:5 4;pointer-events:none}
+.cloth-2d-target-label{fill:#c9fb5d;font:9px var(--mono);letter-spacing:.8px;pointer-events:none}
 
 /* Policy Run Little Progress Bar */
 .policy-run-container{display:flex;flex-direction:column;align-items:center;gap:5px}
