@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import compiled from '../data/compiled.json' with { type: 'json' };
-import { ARM, ARM_B, distance, evaluateCellSafety, forwardKinematics, HOME_POSE, planSafeCellMotion, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
+import { ARM, ARM_B, distance, evaluateCellSafety, forwardKinematics, HOME_POSE, planSafeCellMotion, projectToReachableWorkspace, reduceSafeCellMotion, solveInverseKinematics } from '../src/core.js';
 
 // Split out of core.test.js so its heavy per-workflow search runs in its own
 // process, in parallel with the rest of the suite, instead of adding to a
@@ -23,8 +23,11 @@ test('every policy path stays over the floor, inside its edges, and clear of the
     const motion = planSafeCellMotion(poses, plans.map((plan) => plan.q), safety);
     assert.ok(motion, `${workflow.id} should have a safe policy path`);
     assert.ok(motion.frames.length <= workflow.horizon_steps, `${workflow.id} needs ${motion.frames.length}/${workflow.horizon_steps} steps`);
+    const reduced = reduceSafeCellMotion(poses, motion.frames, safety);
+    assert.ok(reduced, `${workflow.id} should retain a safe reduced policy path`);
+    assert.ok(reduced.frames.length <= motion.frames.length, `${workflow.id} reducer must not add steps`);
     let previous = poses.map(({ q }) => q);
-    for (const frame of motion.frames) {
+    for (const frame of reduced.frames) {
       const assessment = evaluateCellSafety(frame.map((q, index) => ({ q, arm: definitions[index][0] })), safety);
       assert.equal(assessment.safe, true, `${workflow.id} crossed its ${assessment.reason} boundary`);
       frame.forEach((q, armIndex) => q.forEach((value, joint) => {

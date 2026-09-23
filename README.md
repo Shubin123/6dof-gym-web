@@ -80,6 +80,7 @@ three.js is loaded on demand. It sits in its own lazy chunk, so the initial page
 The demo planner is a transparent geometric controller, and a run is bounded rather than open-ended:
 
 - **Halt state.** Every run ends in a named state — *goal reached* with the step count, *step budget exhausted*, *safety boundary*, or *halted by operator* — so a success is never confused with a run that simply gave up. The run button becomes a halt button while a policy is moving.
+- **Two-stage solver.** For free-space tasks, the first stage finds a collision-checked route and a second-stage reducer then tries longer shortcuts. It resamples every candidate under the same joint-delta cap and rejects it unless every frame stays above the floor, inside the workspace, and clear of the other arm. This reduces control steps without relaxing safety. Task 07 deliberately retains every grasp, lift, cross, placement, and settling frame: reducing those dynamic-cloth phases would make the fabric stretch unrealistically.
 - **Speed.** A slider advances the run between 0.25× and 8× control steps per frame: slow enough to watch a correction, fast enough to skip a long reach.
 - **Step budget.** The **Step budget** slider sets the maximum number of control steps (1–400). Each scenario loads its recommended horizon, including 200 for Towel fold; raise it to inspect a longer run or lower it to test bounded failure handling.
 - **Retry until goal.** When enabled, a run that exhausts its step budget returns to home and retries; a reached goal stops the run, and a safety halt is never retried automatically. Scenario 07 enables this by default.
@@ -106,3 +107,7 @@ Voice capture is capped at 60 seconds / 5 MB and episode import at 8 MB, prevent
 ## Deployment
 
 The Pages workflow tests, builds, and deploys `main`. Repository Pages is configured to use **GitHub Actions** as the source.
+
+## Attribution
+
+See [AUTHORS.md](AUTHORS.md) for project authorship and source attribution.

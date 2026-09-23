@@ -1,7 +1,7 @@
 import './styles.css';
 import compiled from '../data/compiled.json';
 import registry from '../data/sources.json';
-import { ARM, ARM_B, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, solveInverseKinematics } from './core.js';
+import { ARM, ARM_B, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, reduceSafeCellMotion, solveInverseKinematics } from './core.js';
 import { ClothSimulator } from './cloth.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -922,19 +922,23 @@ function startPolicy() {
   state.policy.restart = null;
   if (!replanArms()) { state.policy.status = HALT.SAFETY; renderHaltState(); return; }
 
+  const poses = activeArms().map(({ q, arm }) => ({ q, arm }));
   let motion = null;
   if (state.currentWorkflow.id === 'fold' && activeArms().length === 2) {
     motion = planTowelFoldMotion(
-      activeArms().map(({ q, arm }) => ({ q, arm })),
+      poses,
       compiled.environment.safety,
     );
   }
   if (!motion) {
     motion = planSafeCellMotion(
-      activeArms().map(({ q, arm }) => ({ q, arm })),
+      poses,
       activeArms().map(({ plan }) => plan.q),
       compiled.environment.safety,
     );
+    // First find a route, then reduce it. The reducer resamples and validates
+    // every proposed shortcut, so fewer steps never means a looser envelope.
+    if (motion) motion = reduceSafeCellMotion(poses, motion.frames, compiled.environment.safety);
   }
   if (!motion) { state.safetyNotice = 'workspace'; state.policy.status = HALT.SAFETY; renderHaltState(); updateTelemetry(); return; }
   state.policy.path = motion.frames;

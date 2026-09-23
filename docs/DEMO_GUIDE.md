@@ -12,6 +12,8 @@ ArmLab is a browser-only simulation for checking task geometry, recording the in
 
 Use **Step budget** to set the run limit from 1 to 400 steps. Each task initially selects its recommended horizon; Towel fold starts at 200. Increasing the budget lets a run continue longer, but never bypasses the safety checks.
 
+Before free-space motion begins, the planner uses two stages: it first finds a safe route, then a reducer retests longer shortcuts at the normal per-joint step cap. A shortcut is kept only if every resampled frame clears the floor, table boundary, and other arm. Towel fold keeps its full pin, lift, cross, placement, and cloth-settling frames because reducing the dynamic phases would stretch the cloth unrealistically.
+
 **Retry until goal** retries only after a step-budget halt, returning to the home pose for a fresh safe plan. It stops after a reached goal and never retries a safety halt. Scenario 07 turns it on by default.
 
 ## Safety policy

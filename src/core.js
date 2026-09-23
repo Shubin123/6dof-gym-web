@@ -392,6 +392,66 @@ export function planSafeCellMotion(poses, targets, safety = {}) {
   return best;
 }
 
+/**
+ * Second-stage, collision-checked path reduction for a cell trajectory.
+ *
+ * The first planner deliberately favors finding a safe path. This reducer
+ * reruns the safety test over longer candidate edges and keeps a shortcut
+ * only when every resampled frame obeys the same joint-delta, floor,
+ * workspace, and inter-arm rules. `requiredFrameIndexes` preserve semantic
+ * stages such as a towel grasp, lift, and placement.
+ */
+export function reduceSafeCellMotion(poses, frames, safety = {}, { requiredFrameIndexes = [], keepTailFrames = 0 } = {}) {
+  if (!frames?.length) return { frames: [], sourceFrames: 0, reducedBy: 0 };
+  const arms = poses.map(({ arm = ARM }) => arm);
+  const validFrame = (frame) => evaluateCellSafety(frame.map((q, index) => ({ q, arm: arms[index] })), safety).safe;
+  const safeCellEdge = (from, to) => {
+    const steps = Math.max(1, ...to.map((q, armIndex) => Math.ceil(maxJointDistance(from[armIndex], q) / (arms[armIndex].maxActionDelta * 0.96))));
+    const samples = [];
+    for (let step = 1; step <= steps; step += 1) {
+      const frame = to.map((q, armIndex) => interpolateJoints(from[armIndex], q, step / steps));
+      if (!validFrame(frame)) return null;
+      samples.push(frame);
+    }
+    return samples;
+  };
+
+  const stops = new Set([frames.length - 1]);
+  requiredFrameIndexes.forEach((index) => { if (index >= 0 && index < frames.length) stops.add(index); });
+  for (let index = Math.max(0, frames.length - keepTailFrames); index < frames.length; index += 1) stops.add(index);
+  const endpoints = [...stops].sort((a, b) => a - b);
+  const reduced = [];
+  let sourceStart = -1;
+  let current = poses.map(({ q }) => [...q]);
+
+  for (const endpoint of endpoints) {
+    let cursor = sourceStart;
+    while (cursor < endpoint) {
+      let accepted = null;
+      let acceptedIndex = cursor + 1;
+      for (let candidate = endpoint; candidate > cursor; candidate -= 1) {
+        const shortcut = safeCellEdge(current, frames[candidate]);
+        if (!shortcut) continue;
+        accepted = shortcut;
+        acceptedIndex = candidate;
+        break;
+      }
+      // The original adjacent frame is guaranteed to be a valid fallback for
+      // planner output; keep it defensively if a caller supplied bad input.
+      if (!accepted) {
+        const fallback = frames[cursor + 1];
+        if (!validFrame(fallback)) return null;
+        accepted = [fallback.map((q) => [...q])];
+      }
+      reduced.push(...accepted.map((frame) => frame.map((q) => [...q])));
+      current = reduced.at(-1);
+      cursor = acceptedIndex;
+    }
+    sourceStart = endpoint;
+  }
+  return { frames: reduced, sourceFrames: frames.length, reducedBy: frames.length - reduced.length };
+}
+
 let cachedFoldPath = null;
 
 /**
@@ -426,9 +486,11 @@ export function planTowelFoldMotion(poses, safety = {}) {
   }
 
   const frames = [];
+  const stageEnds = [];
   const approach = planSafeCellMotion(poses, [planA.q, planB.q], safety);
   if (!approach) return null;
   for (const frame of approach.frames) frames.push([[...frame[0]], [...frame[1]]]);
+  stageEnds.push(frames.length - 1);
 
   let curB = frames.length ? frames.at(-1)[1] : poses[1].q;
   const foldWaypoints = [
@@ -444,6 +506,7 @@ export function planTowelFoldMotion(poses, safety = {}) {
     for (const q of path) {
       frames.push([[...planA.q], [...q]]);
     }
+    stageEnds.push(frames.length - 1);
     curB = path.at(-1);
   }
 
@@ -451,11 +514,12 @@ export function planTowelFoldMotion(poses, safety = {}) {
     frames.push([[...planA.q], [...curB]]);
   }
 
-  if (isHomeA && isHomeB) {
-    cachedFoldPath = frames.map((f) => [[...f[0]], [...f[1]]]);
-  }
-
-  return { frames, planA, planB };
+  // Unlike free-space reaches, the fold phases drive a dynamic cloth model.
+  // Keep their full rate-capped samples: reducing them makes the grasped edge
+  // move too abruptly and stretches the simulated fabric. Generic policies
+  // still receive the second-stage reducer in startPolicy().
+  if (isHomeA && isHomeB) cachedFoldPath = frames.map((f) => [[...f[0]], [...f[1]]]);
+  return { frames, sourceFrames: frames.length, reducedBy: 0, stageEnds, planA, planB };
 }
 
 /**

@@ -14,6 +14,7 @@ test('planTowelFoldMotion produces a valid collision-free bimanual folding traje
   const motion = planTowelFoldMotion(poses, safety);
   assert.ok(motion, 'Towel fold motion should be planned');
   assert.ok(motion.frames.length > 50, 'Folding motion has multiple trajectory phases');
+  assert.equal(motion.reducedBy, 0, 'Dynamic fold stages retain their physical-rate frames');
 
   let previous = poses.map(({ q }) => q);
   for (const frame of motion.frames) {
