@@ -19,7 +19,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test"
+    "test": "node --test",
+    "test:coverage": "node --test --experimental-test-coverage"
   },
   "devDependencies": {
     "vite": "^8.3.0"

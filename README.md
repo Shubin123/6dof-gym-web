@@ -18,7 +18,7 @@ npm test
 npm run build
 ```
 
-For a hands-on walkthrough, control reference, episode format, and browser troubleshooting, see [the demo guide](docs/DEMO_GUIDE.md).
+For a hands-on walkthrough, control reference, episode format, and browser troubleshooting, see [the demo guide](docs/DEMO_GUIDE.md). For what the automated suite covers, how to run it with coverage, and the manual browser checklist for the parts it can't reach, see [the testing guide](docs/TESTING.md).
 
 ## What is real in this prototype
 
