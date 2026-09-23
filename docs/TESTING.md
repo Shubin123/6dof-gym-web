@@ -20,7 +20,7 @@ As of this writing the suite is 46 tests across 8 files, all passing, with line 
 | `test/core.test.js` | The task contract itself (goals inside the workspace and reach shell), forward/inverse kinematics, the safety-cell evaluator, episode-artifact shape, and the solver-ticker formatter. |
 | `test/motion-safety.test.js` | Every declared workflow plans a full safe route end to end — solve IK, plan a safe cell motion, reduce it, and confirm every resulting frame clears the floor, the workspace edge, the other arm, and the per-joint delta cap. |
 | `test/guidance-recovery.test.js` | The tracking controller (`guidedStep`) recovers cleanly from representative manual poses scattered across the workspace, not just from the home pose. |
-| `test/cloth.test.js` | The PBD cloth simulator in isolation: grid topology, resting stability under gravity, table friction, grasp/track behavior, the fold motion's layer separation, and snapshot/restore for timeline scrubbing. |
+| `test/cloth.test.js` | The kernel-based cloth simulator in isolation: mesh-derived topology (seam merging, spring CSR), resting stability and a flat midline, resting stability under gravity, table friction, magnet grasp/release and tracking, the fold motion's layer separation, and snapshot/restore for timeline scrubbing. |
 | `test/demo7.test.js` | The Towel fold task specification and its bimanual folding motion end to end, including cloth physics interacting with the planned trajectory. |
 | `test/towel-fold-planner.test.js` | `planTowelFoldMotion` in isolation: a valid, collision-free, bimanual route for the fold task specifically. |
 | `test/task-policies.test.js` | The declarative policy-recipe registry and the dense per-stage fold reward. |

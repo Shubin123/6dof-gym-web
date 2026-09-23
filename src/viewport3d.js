@@ -174,7 +174,7 @@ function makeGoal(mirrored) {
   return { group, cube, beam, grip, handles, handleMaterial };
 }
 
-/** Realistic Position-Based Dynamics cloth for the task-07 demonstration. */
+/** Spring-network cloth (see src/cloth.js) for the task-07 demonstration. */
 function makeCloth() {
   const simulator = new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2 });
   const geometry = new THREE.PlaneGeometry(simulator.width, simulator.height, simulator.columns, simulator.rows);

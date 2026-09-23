@@ -502,7 +502,7 @@ export function planTowelFoldMotion(poses, safety = {}, profile = {}) {
   const placeHeight = profile.placeHeight ?? 6;
   // The cloth solver needs on the order of 40-50 idle frames after the final
   // placement to relax out of the transient overstretch a fast cross-over
-  // leaves behind (see cloth.js's self-collision relaxation comment) and
+  // leaves behind (see cloth.js's layer-separation comment) and
   // reach a stable, genuinely folded rest state - a handful of frames looks
   // identical to "still mid-fold" when the run ends.
   const settleFrames = profile.settleFrames ?? 50;
@@ -546,7 +546,7 @@ export function planTowelFoldMotion(poses, safety = {}, profile = {}) {
     curB = path.at(-1);
   }
 
-  // A short settle phase lets the PBD cloth relax without exceeding the
+  // A short settle phase lets the cloth relax without exceeding the
   // fold workflow's 400-step operating budget.
   for (let h = 0; h < settleFrames; h += 1) {
     frames.push([[...curA], [...curB]]);

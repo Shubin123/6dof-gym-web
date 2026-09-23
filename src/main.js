@@ -352,7 +352,7 @@ function advanceClothPhysics() {
     const tip = tipOf(armState);
     return { x: (tip[0] - 325) / 100, y: (tip[1] - 240) / 100, z: tip[2] / 100 };
   });
-  // Two fixed PBD substeps per 25 Hz command give constraints time to settle
+  // Two fixed cloth steps per 25 Hz command give the springs time to settle
   // between waypoints without making rendering cadence part of the dynamics.
   for (let substep = 0; substep < 2; substep += 1) {
     state.cloth2d.step({ targetA: targets[0], targetB: targets[1] });
@@ -710,7 +710,7 @@ async function setViewportMode(mode) {
   try {
     setLoaderProgress(40, 'Building spatial kinematics & workcell…');
     await new Promise((resolve) => setTimeout(resolve, 60));
-    setLoaderProgress(70, 'Initializing Position-Based Dynamics cloth physics…');
+    setLoaderProgress(70, 'Initializing spring-network cloth physics…');
     const instance = await mountViewport3D();
     setLoaderProgress(95, 'Compiling WebGL shaders & lighting…');
     await new Promise((resolve) => setTimeout(resolve, 80));

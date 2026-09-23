@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ClothSimulator, DEFAULT_CLOTH_CONFIG } from '../src/cloth.js';
+import { ClothSimulator, buildClothTopology } from '../src/cloth.js';
 
 test('ClothSimulator initializes with correct grid topology and constraints', () => {
   const sim = new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2 });
@@ -9,21 +9,83 @@ test('ClothSimulator initializes with correct grid topology and constraints', ()
   assert.equal(sim.positions.length, expectedVertices * 3);
   assert.equal(sim.restPositions.length, expectedVertices * 3);
 
-  // Structural springs: horizontal (columns * (rows + 1)) + vertical (rows * (columns + 1))
+  // Stretch springs are the non-diagonal triangle edges:
+  // horizontal (columns * (rows + 1)) + vertical (rows * (columns + 1))
   const expectedStructural = 14 * 12 + 11 * 15; // 168 + 165 = 333
   assert.equal(sim.structuralSprings.length / 3, expectedStructural);
 
-  // Shear springs: 2 per quad cell (2 * columns * rows)
-  const expectedShear = 2 * 14 * 11; // 308
+  // Shear springs: the one triangulation diagonal per quad cell
+  const expectedShear = 14 * 11; // 154
   assert.equal(sim.shearSprings.length / 3, expectedShear);
 
-  // Bending springs: 2-step horizontal ((columns - 1) * (rows + 1)) + 2-step vertical ((rows - 1) * (columns + 1))
-  const expectedBending = 13 * 12 + 10 * 15; // 156 + 150 = 306
+  // Bending springs: one per interior edge, joining the far corners of the
+  // two triangles that share it (all edges minus the perimeter)
+  const expectedBending = expectedStructural + expectedShear - 2 * (14 + 11); // 437
   assert.equal(sim.bendingSprings.length / 3, expectedBending);
 
-  // Anchors initialized
-  assert.ok(sim.anchorsA.length > 0, 'Arm A pinning anchors exist');
-  assert.ok(sim.anchorsB.length > 0, 'Arm B grasping anchors exist');
+  // Graspable corners painted per arm
+  assert.deepEqual(sim.anchorsA, [0], 'Arm A grasps the front-left corner');
+  assert.deepEqual(sim.anchorsB, [14], 'Arm B grasps the front-right corner');
+});
+
+test('buildClothTopology merges seam duplicates and indexes every spring per point', () => {
+  // Two triangles of a unit quad whose shared edge is duplicated, as an
+  // exporter does across a UV seam: 6 vertices, 4 spatial points.
+  const positions = [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0];
+  const index = [0, 1, 2, 3, 4, 5];
+  const topo = buildClothTopology(positions, index);
+
+  assert.equal(topo.positions.length / 3, 4, 'coincident vertices collapse to one point');
+  assert.deepEqual(Array.from(topo.vertexToPoint), [0, 1, 2, 1, 3, 2]);
+  // 4 perimeter edges + 1 shared diagonal, plus the opposite-corner bend spring
+  assert.equal(topo.springKinds.length, 6);
+  assert.equal(topo.springKinds.filter((kind) => kind === 1).length, 1, 'the shared hypotenuse is the shear spring');
+
+  // CSR: [count, ids...] per point; every spring appears under both its ends
+  const seen = new Array(topo.springKinds.length).fill(0);
+  for (let p = 0; p < 4; p += 1) {
+    const start = topo.springPointer[p];
+    const count = topo.springsPerPoint[start];
+    for (let k = start + 1; k <= start + count; k += 1) {
+      const s = topo.springsPerPoint[k];
+      assert.ok(topo.springs[s * 2] === p || topo.springs[s * 2 + 1] === p, `spring ${s} listed under point ${p} touches it`);
+      seen[s] += 1;
+    }
+  }
+  assert.ok(seen.every((n) => n === 2), 'each spring is reachable from exactly its two points');
+});
+
+test('A flat towel at rest stays flat: weave neighbours across the midline are not fold layers', () => {
+  // Midline neighbours are closer than the layer-overlap radius; treating
+  // them as stacked layers lifted the flat towel before anything touched it.
+  const sim = new ClothSimulator({ columns: 14, rows: 11 });
+  for (let s = 0; s < 40; s += 1) sim.step();
+  for (let i = 0; i < sim.numVertices; i += 1) {
+    assert.ok(Math.abs(sim.positions[i * 3 + 2] - sim.tableZ) < 1e-4, `vertex ${i} left the table: z = ${sim.positions[i * 3 + 2]}`);
+  }
+});
+
+test('A grasp binds the nearest painted corner as a magnet and a release frees it', () => {
+  const sim = new ClothSimulator({ columns: 10, rows: 8 });
+  // Hovering over the middle of the towel grabs nothing: only painted
+  // corners are graspable.
+  sim.step({ targetA: { x: 0, y: 0, z: 0.05 } });
+  assert.equal(sim.captured[0], false);
+  assert.ok(sim.pointMagnet.every((m) => m === 0));
+
+  const corner = { x: -0.75, y: -0.6, z: 0.02 };
+  sim.step({ targetA: corner });
+  assert.equal(sim.pointMagnet[0], 1, 'corner 0 is bound to magnet A');
+  assert.equal(sim.invMass[0], 0, 'a magnet-held point is kinematic');
+
+  // Retracting past releaseRadius releases the arm; the corner is kept on
+  // the table by the pin instead.
+  sim.step({ targetA: { x: -0.75, y: -0.6, z: 0.8 } });
+  assert.equal(sim.captured[0], false);
+  assert.equal(sim.released[0], true);
+  assert.ok(sim.tablePinA, 'released corner is pinned to the table');
+  for (let s = 0; s < 10; s += 1) sim.step({ targetA: { x: -0.75, y: -0.6, z: 0.8 } });
+  assert.ok(Math.abs(sim.positions[2] - sim.tableZ) < 1e-4, 'pinned corner stays on the table');
 });
 
 test('Cloth rests stably on table under gravity without penetrating floor', () => {
@@ -135,9 +197,10 @@ test('Snapshot and restore support instant timeline frame loading', () => {
   assert.ok(snap1.positions instanceof Float32Array);
   assert.equal(snap1.captured[0], true);
 
-  // Deform cloth
+  // Deform cloth. The target stays within releaseRadius of the grasp point
+  // so the arm keeps hold and actually drags the towel.
   for (let s = 0; s < 25; s += 1) {
-    sim.step({ targetA: { x: -0.4, y: -0.3, z: 0.3 } });
+    sim.step({ targetA: { x: -0.6, y: -0.45, z: 0.3 } });
   }
   // The captured corner is intentionally kinematic; inspect its neighbouring
   // free vertex to prove that the saved cloth state actually differs.
