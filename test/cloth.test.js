@@ -148,6 +148,62 @@ test('Snapshot and restore support instant timeline frame loading', () => {
   assert.deepEqual(sim.captured, snap1.captured);
 });
 
+/** Max relative stretch error for an arbitrary snapshot, not just sim.positions. */
+function maxStretchErrorOf(sim, positions) {
+  let maxError = 0;
+  for (let s = 0; s < sim.structuralSprings.length; s += 3) {
+    const i1 = sim.structuralSprings[s];
+    const i2 = sim.structuralSprings[s + 1];
+    const restLen = sim.structuralSprings[s + 2];
+    const dx = positions[i2 * 3] - positions[i1 * 3];
+    const dy = positions[i2 * 3 + 1] - positions[i1 * 3 + 1];
+    const dz = positions[i2 * 3 + 2] - positions[i1 * 3 + 2];
+    const len = Math.hypot(dx, dy, dz);
+    maxError = Math.max(maxError, Math.abs(len - restLen) / restLen);
+  }
+  return maxError;
+}
+
+test('Frame buffer: every recorded step of a full fold trajectory stays physically valid', () => {
+  // history is recorded for the settling detector, but it is also a ready-made
+  // fixture: replaying a real trajectory once and then checking every frame it
+  // produced catches mid-trajectory instability (e.g. the fabric overstretching
+  // partway through a fold before settling back down) that an end-state-only
+  // check would miss entirely.
+  const sim = new ClothSimulator({ columns: 12, rows: 10, thickness: 0.035 });
+  const targetA = { x: -0.75, y: -0.6, z: 0.02 };
+  const targetB = { x: 0.75, y: -0.6, z: 0.02 };
+  sim.step({ targetA, targetB });
+
+  const steps = 60;
+  for (let s = 0; s <= steps; s += 1) {
+    const t = s / steps;
+    const x = 0.75 - t * 1.05;
+    const z = 0.02 + Math.sin(t * Math.PI) * 0.35 + (1 - t) * 0.02;
+    sim.step({ targetA, targetB: { x, y: -0.6, z } });
+  }
+
+  assert.ok(sim.history.length > 50, 'the trajectory recorded enough frames to be a meaningful fixture');
+  assert.ok(Array.from(sim.history.at(-1)).every((v, i) => v === sim.positions[i]), 'the newest buffered frame matches the live state');
+
+  sim.history.forEach((frame, index) => {
+    for (let i = 0; i < sim.numVertices; i += 1) {
+      const z = frame[i * 3 + 2];
+      assert.ok(!Number.isNaN(z), `frame ${index} vertex ${i} went NaN`);
+      assert.ok(z >= sim.tableZ - 1e-4, `frame ${index} vertex ${i} penetrated the table: z = ${z}`);
+    }
+    const stretch = maxStretchErrorOf(sim, frame);
+    assert.ok(stretch < 0.6, `frame ${index} stretched past a physically plausible bound: ${stretch.toFixed(3)}`);
+  });
+});
+
+test('Frame buffer stays bounded to historyLimit and keeps only the most recent frames', () => {
+  const sim = new ClothSimulator({ columns: 6, rows: 5, historyLimit: 20 });
+  for (let s = 0; s < 45; s += 1) sim.step({ targetA: { x: -0.75, y: -0.6, z: 0.02 } });
+  assert.equal(sim.history.length, 20, 'the buffer stops growing at historyLimit');
+  assert.ok(Array.from(sim.history.at(-1)).every((v, i) => v === sim.positions[i]), 'the last buffered frame is the current state');
+});
+
 test('2D projection polygon outputs valid perimeter and crease points', () => {
   const sim = new ClothSimulator({ columns: 8, rows: 6 });
   const { basePoints, creasePoints } = sim.get2DPolygons([325, 240], 100);
