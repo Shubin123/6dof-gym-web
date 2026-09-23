@@ -367,6 +367,109 @@ export function planSafeMotion(start, target, arm = ARM, safety = {}, otherPoses
   return null;
 }
 
+/** 3x6 tool-tip Jacobian by central differences, in scene pixels per radian. */
+function tipJacobian(q, arm) {
+  const h = 1e-4;
+  const columns = q.map((_, joint) => {
+    const plus = [...q];
+    const minus = [...q];
+    plus[joint] += h;
+    minus[joint] -= h;
+    const a = forwardKinematics(plus, arm).points.at(-1);
+    const b = forwardKinematics(minus, arm).points.at(-1);
+    return [0, 1, 2].map((axis) => (a[axis] - b[axis]) / (2 * h));
+  });
+  return [0, 1, 2].map((row) => columns.map((column) => column[row]));
+}
+
+const dot6 = (a, b) => a.reduce((sum, value, index) => sum + value * b[index], 0);
+
+/** Solve the 3x3 system m x = v by Cramer's rule. */
+function solve3(m, v) {
+  const det = (a) => a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
+    - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
+    + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+  const d = det(m);
+  return [0, 1, 2].map((column) => det(m.map((row, r) => row.map((value, c) => (c === column ? v[r] : value)))) / d);
+}
+
+/**
+ * Move one arm's tool tip along straight lines through `waypoints`, one
+ * rate-capped frame at a time: resolved-rate control with a damped
+ * least-squares step (dq = Jᵀ (J Jᵀ + λ² I)⁻¹ dx) toward the next point on
+ * the line. A joint-space route between the same endpoints can swing the tip
+ * across half the table; a gripper holding cloth must not. Returns null if a
+ * segment cannot be followed within tolerance or a frame fails safety, so the
+ * caller can choose another route.
+ */
+export function planCartesianMotion(start, waypoints, arm = ARM, safety = {}, otherPoses = [], { stepPx = 2.5, tolerancePx = 1.5 } = {}) {
+  const cap = arm.maxActionDelta * 0.96;
+  const damping = 6;
+  const isSafe = (q) => evaluateCellSafety([...otherPoses, { q, arm }], safety).safe;
+  const tipOf = (q) => forwardKinematics(q, arm).points.at(-1);
+  if (!isSafe(start)) return null;
+
+  const frames = [];
+  let q = [...start];
+  // Converge on `target` in one frame if the cap allows, otherwise as far as it does.
+  const advance = (target) => {
+    const frameStart = [...q];
+    let next = [...q];
+    for (let iteration = 0; iteration < 16; iteration += 1) {
+      const error = sub(target, tipOf(next));
+      if (norm(error) < 0.2) break;
+      const full = tipJacobian(next, arm);
+      const low = next.map((value, joint) => Math.max(-limitOf(arm, joint), frameStart[joint] - cap));
+      const high = next.map((value, joint) => Math.min(limitOf(arm, joint), frameStart[joint] + cap));
+      // Joints already against a bound and pushed further into it are taken
+      // out of the Jacobian, so the rest of the chain carries the motion.
+      const active = next.map(() => true);
+      let dq = null;
+      for (let pass = 0; pass < 4; pass += 1) {
+        const j = full.map((row) => row.map((value, joint) => (active[joint] ? value : 0)));
+        const jjt = [0, 1, 2].map((r) => [0, 1, 2].map((c) => dot6(j[r], j[c]) + (r === c ? damping ** 2 : 0)));
+        const y = solve3(jjt, error);
+        dq = next.map((_, joint) => j[0][joint] * y[0] + j[1][joint] * y[1] + j[2][joint] * y[2]);
+        // Null-space pull toward mid-range keeps redundant joints off their
+        // limits without disturbing the tool tip.
+        const centre = next.map((value, joint) => (active[joint] ? -0.08 * value / limitOf(arm, joint) : 0));
+        const jc = [0, 1, 2].map((r) => dot6(j[r], centre));
+        const yc = solve3(jjt, jc);
+        dq = dq.map((value, joint) => value + centre[joint] - (j[0][joint] * yc[0] + j[1][joint] * yc[1] + j[2][joint] * yc[2]));
+        let blocked = false;
+        next.forEach((value, joint) => {
+          if (!active[joint]) return;
+          if ((value <= low[joint] + 1e-9 && dq[joint] < 0) || (value >= high[joint] - 1e-9 && dq[joint] > 0)) {
+            active[joint] = false;
+            blocked = true;
+          }
+        });
+        if (!blocked) break;
+      }
+      next = next.map((value, joint) => clamp(value + dq[joint], low[joint], high[joint]));
+    }
+    return next;
+  };
+
+  for (const waypoint of waypoints) {
+    const from = tipOf(q);
+    const samples = Math.max(1, Math.ceil(distance(from, waypoint) / stepPx));
+    for (let s = 1; s <= samples; s += 1) {
+      const t = s / samples;
+      const target = [0, 1, 2].map((axis) => from[axis] + (waypoint[axis] - from[axis]) * t);
+      // A capped frame may fall short; spend extra frames catching up.
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        q = advance(target);
+        if (!isSafe(q)) return null;
+        frames.push([...q]);
+        if (distance(tipOf(q), target) < tolerancePx) break;
+      }
+      if (distance(tipOf(q), target) >= tolerancePx) return null;
+    }
+  }
+  return frames;
+}
+
 /**
  * Plan a whole cell by moving one arm at a time and trying both bimanual
  * orders. Every returned frame has already passed the shared safety check.
@@ -458,12 +561,15 @@ let cachedFoldPath = null;
  * Specialized bimanual motion planner for the laundry folding demo (Task 07).
  *
  * Coordinates both arms through the teachable folding sequence:
- *  1. Arm A & Arm B safely approach the towel corners (pin left, grasp right)
- *  2. Arm A firmly pins the left edge to the table
- *  3. Arm B lifts the right edge, arcs across the midline, and folds it over
- *  4. Arm B lowers and places the folded edge near the pinned edge
- *  5. Holds the fold while the physical cloth settles into rest
+ *  1. Both arms approach above their towel corners (free space, joint route)
+ *  2. Each tool descends straight onto its corner and closes
+ *  3. Arm B lifts its corner along an arc over the fold line while A pins
+ *  4. Arm A opens, rises straight off the towel and returns home
+ *  5. Arm B completes the arc and places its corner on A's
+ *  6. Holds the fold while the cloth settles
  *
+ * Every stage that carries cloth is a straight-line tool path
+ * (planCartesianMotion), and `grips` gives the gripper command per frame.
  * Every frame is validated against floor, workspace, and inter-arm clearance limits.
  */
 export function planTowelFoldMotion(poses, safety = {}, profile = {}) {
@@ -471,93 +577,107 @@ export function planTowelFoldMotion(poses, safety = {}, profile = {}) {
   const armA = poses[0].arm || ARM;
   const armB = poses[1].arm || ARM_B;
 
-  const goalA = [250, 180, 15];
-  const goalB = [400, 180, 15];
-  const planA = solveInverseKinematics(goalA, armA, safety);
-  const planB = solveInverseKinematics(goalB, armB, safety, [{ q: planA.q, arm: armA }]);
+  // Towel corners in scene pixels (the cloth sim's front corners), the fold
+  // line between them, and the heights the grippers work at.
+  const cornerA = [250, 180];
+  const cornerB = [400, 180];
+  const foldX = (cornerA[0] + cornerB[0]) / 2;
+  const hoverZ = profile.hoverZ ?? 40;
+  const graspZ = profile.graspZ ?? 4;
+  const arcHeight = profile.arcHeight ?? 48;
+  const placeHeight = profile.placeHeight ?? 6;
+  const settleFrames = profile.settleFrames ?? 50;
+  const dwellFrames = 3;
 
-  if (!planA?.safety?.safe || !planB?.safety?.safe) return null;
+  // Solve at the grasp itself, where the solver can pick a posture that is
+  // safe with the tool down on the table; each descent is then the reverse of
+  // a straight rise from that posture, so it ends exactly on the corner.
+  const graspA = solveInverseKinematics([...cornerA, graspZ], armA, safety);
+  const graspB = solveInverseKinematics([...cornerB, graspZ], armB, safety, [{ q: graspA.q, arm: armA }]);
+  if (!graspA?.safety?.safe || !graspB?.safety?.safe) return null;
+  const riseB = planCartesianMotion(graspB.q, [[...cornerB, hoverZ]], armB, safety, [{ q: graspA.q, arm: armA }]);
+  const riseA = riseB && planCartesianMotion(graspA.q, [[...cornerA, hoverZ]], armA, safety, [{ q: riseB.at(-1), arm: armB }]);
+  if (!riseA) return null;
+  const planA = { ...graspA, q: riseA.at(-1) };
+  const planB = { ...graspB, q: riseB.at(-1) };
 
   const isHomeA = jointDistance(poses[0].q, HOME_POSE) < 1e-3;
   const isHomeB = jointDistance(poses[1].q, HOME_POSE) < 1e-3;
-
   if (isHomeA && isHomeB && cachedFoldPath) {
-    return { frames: cachedFoldPath.map((f) => [[...f[0]], [...f[1]]]), planA, planB };
+    return { ...cachedFoldPath, frames: cachedFoldPath.frames.map((f) => [[...f[0]], [...f[1]]]), grips: cachedFoldPath.grips.map((g) => [...g]), planA, planB };
   }
 
   const frames = [];
+  const grips = [];
   const stageEnds = [];
+  let curA = poses[0].q;
+  let curB = poses[1].q;
+  let grip = [false, false];
+  const push = (qA, qB) => {
+    curA = qA;
+    curB = qB;
+    frames.push([[...qA], [...qB]]);
+    grips.push([...grip]);
+  };
+  const dwell = (count) => { for (let i = 0; i < count; i += 1) push(curA, curB); };
+  const endStage = () => stageEnds.push(frames.length - 1);
+
+  // 1. Approach: free space, no cloth held, so any safe joint route will do.
+  //    It ends above the corners so no sweep passes through a grasp.
   const approach = planSafeCellMotion(poses, [planA.q, planB.q], safety);
   if (!approach) return null;
-  for (const frame of approach.frames) frames.push([[...frame[0]], [...frame[1]]]);
-  stageEnds.push(frames.length - 1);
+  for (const [qA, qB] of approach.frames) push(qA, qB);
+  endStage();
 
-  let curA = planA.q;
-  let curB = frames.length ? frames.at(-1)[1] : poses[1].q;
-  // Lift while Arm A pins, then retract Arm A before the folded edge crosses
-  // the pin. Keeping both tools at the fold line violates arm clearance and
-  // leaves the towel loose at x≈300 instead of placed on the pinned edge.
-  const liftHeight = profile.liftHeight ?? 45;
-  const crossHeight = profile.crossHeight ?? 38;
-  const placeHeight = profile.placeHeight ?? 6;
-  // The cloth solver needs on the order of 40-50 idle frames after the final
-  // placement to relax out of the transient overstretch a fast cross-over
-  // leaves behind (see cloth.js's layer-separation comment) and
-  // reach a stable, genuinely folded rest state - a handful of frames looks
-  // identical to "still mid-fold" when the run ends.
-  const settleFrames = profile.settleFrames ?? 50;
-  const liftWaypoint = [380, 180, liftHeight];
-  const liftPlan = solveInverseKinematics(liftWaypoint, armB, safety, [{ q: curA, arm: armA }]);
-  if (!liftPlan?.safety?.safe) return null;
-  const liftPath = planSafeMotion(curB, liftPlan.q, armB, safety, [{ q: curA, arm: armA }]);
-  if (!liftPath) return null;
-  for (const q of liftPath) frames.push([[...curA], [...q]]);
-  stageEnds.push(frames.length - 1);
-  curB = liftPath.at(-1);
+  // 2. Descend straight onto each corner and close: the grasp lands on the
+  //    corner instead of snapping it across from wherever the tool passed.
+  const descend = (rise, graspQ) => [...rise.slice(0, -1).reverse(), graspQ];
+  for (const q of descend(riseA, graspA.q)) push(q, curB);
+  for (const q of descend(riseB, graspB.q)) push(curA, q);
+  grip = [true, true];
+  dwell(dwellFrames);
+  endStage();
 
-  const retract = planSafeCellMotion(
-    [{ q: curA, arm: armA }, { q: curB, arm: armB }],
-    [[...HOME_POSE], curB],
-    safety,
-  );
+  // 3. Lift B's corner along an arc over the fold line while A pins its own.
+  //    Every carried segment is a straight tool line (planCartesianMotion).
+  const radius = (cornerB[0] - cornerA[0]) / 2;
+  const arcPoint = (angle) => [foldX + radius * Math.cos(angle), cornerB[1], graspZ + arcHeight * Math.sin(angle)];
+  const liftArc = [1, 2, 3, 4].map((i) => arcPoint((i / 4) * (Math.PI / 2)));
+  const lift = planCartesianMotion(curB, liftArc, armB, safety, [{ q: curA, arm: armA }]);
+  if (!lift) return null;
+  for (const q of lift) push(curA, q);
+  endStage();
+
+  // 4. A lets go, rises straight off the towel, then clears the fold side so
+  //    B can lay the corner where A was holding.
+  grip = [false, true];
+  dwell(dwellFrames);
+  const rise = planCartesianMotion(curA, [[...cornerA, hoverZ]], armA, safety, [{ q: curB, arm: armB }]);
+  if (!rise) return null;
+  for (const q of rise) push(q, curB);
+  const retract = planSafeMotion(curA, [...HOME_POSE], armA, safety, [{ q: curB, arm: armB }]);
   if (!retract) return null;
-  for (const frame of retract.frames) frames.push([[...frame[0]], [...frame[1]]]);
-  stageEnds.push(frames.length - 1);
-  curA = retract.frames.at(-1)[0];
-  curB = retract.frames.at(-1)[1];
+  for (const q of retract) push(q, curB);
+  endStage();
 
-  const foldWaypoints = [
-    [310, 180, liftHeight],
-    [270, 180, crossHeight],
-    // Set the delivered edge just above the table (and its lower layer), not
-    // at a hovering tool height. The thickness barrier supplies the final
-    // separation between the two towel layers.
-    [250, 180, placeHeight],
-  ];
-  for (const wp of foldWaypoints) {
-    const planWp = solveInverseKinematics(wp, armB, safety, [{ q: curA, arm: armA }]);
-    if (!planWp?.safety?.safe) return null;
-    const path = planSafeMotion(curB, planWp.q, armB, safety, [{ q: curA, arm: armA }]);
-    if (!path) return null;
-    for (const q of path) {
-      frames.push([[...curA], [...q]]);
-    }
-    stageEnds.push(frames.length - 1);
-    curB = path.at(-1);
-  }
+  // 5. Finish the arc and place the corner on A's, just above the lower
+  //    layer; the cloth's thickness barrier supplies the final separation.
+  const foldArc = [5, 6, 7].map((i) => arcPoint((i / 8) * Math.PI));
+  const place = planCartesianMotion(curB, [...foldArc, [...cornerA, placeHeight]], armB, safety, [{ q: curA, arm: armA }]);
+  if (!place) return null;
+  for (const q of place) push(curA, q);
+  endStage();
 
-  // A short settle phase lets the cloth relax without exceeding the
-  // fold workflow's 400-step operating budget.
-  for (let h = 0; h < settleFrames; h += 1) {
-    frames.push([[...curA], [...curB]]);
-  }
+  // 6. Hold while the towel settles into its folded rest state.
+  dwell(settleFrames);
 
   // Unlike free-space reaches, the fold phases drive a dynamic cloth model.
   // Keep their full rate-capped samples: reducing them makes the grasped edge
   // move too abruptly and stretches the simulated fabric. Generic policies
   // still receive the second-stage reducer in startPolicy().
-  if (isHomeA && isHomeB) cachedFoldPath = frames.map((f) => [[...f[0]], [...f[1]]]);
-  return { frames, sourceFrames: frames.length, reducedBy: 0, stageEnds, planA, planB };
+  const result = { frames, grips, sourceFrames: frames.length, reducedBy: 0, stageEnds, planA, planB };
+  if (isHomeA && isHomeB) cachedFoldPath = { ...result, frames: frames.map((f) => [[...f[0]], [...f[1]]]), grips: grips.map((g) => [...g]) };
+  return result;
 }
 
 /**

@@ -103,13 +103,32 @@ test('Realistic cloth physics interacts with Demo 7 folding trajectory', () => {
       z: tipB[2] / 100,
     };
 
-    cloth.step({ targetA: localTargetA, targetB: localTargetB });
+    cloth.step({ targetA: localTargetA, targetB: localTargetB, grips: motion.grips[f] });
+
+    // A gripper that closes must close on its corner, not snap it across.
+    motion.grips[f].forEach((closed, arm) => {
+      if (!closed || (f > 0 && motion.grips[f - 1][arm])) return;
+      const corner = arm ? 14 : 0;
+      const tip = arm ? tipB : tipA;
+      const cornerScene = [325 + cloth.positions[corner * 3] * 100, 240 + cloth.positions[corner * 3 + 1] * 100];
+      assert.ok(Math.hypot(cornerScene[0] - tip[0], cornerScene[1] - tip[1]) < 3, `Arm ${arm ? 'B' : 'A'} closes on its corner`);
+    });
+    // The towel is folded where it lies, never dragged around the table.
+    for (let i = 0; i < cloth.numVertices; i += 1) {
+      const x = 325 + cloth.positions[i * 3] * 100;
+      const y = 240 + cloth.positions[i * 3 + 1] * 100;
+      assert.ok(x > 240 && x < 410 && y > 170 && y < 310, `frame ${f}: towel point ${i} dragged off its footprint to (${x.toFixed(0)}, ${y.toFixed(0)})`);
+    }
   }
 
   // Verify corners were captured
   assert.equal(cloth.wasCaptured[0], true, 'Left corner captured by Arm A before its planned release');
   assert.equal(cloth.captured[0], false, 'Arm A releases the pinned edge before Arm B crosses the fold line');
   assert.equal(cloth.captured[1], true, 'Right corner captured by Arm B');
+
+  // A's corner is pinned where A held it, and B's corner is laid on it.
+  assert.ok(Math.hypot(cloth.positions[0] + 0.75, cloth.positions[1] + 0.6) < 0.02, 'pinned corner stays at the front-left corner');
+  assert.ok(Math.hypot(cloth.tablePinA.x + 0.75, cloth.tablePinA.y + 0.6) < 0.02, 'table pin is where Arm A released the corner');
 
   // Verify folding metrics
   const metrics = cloth.getFoldMetrics();

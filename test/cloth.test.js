@@ -284,3 +284,33 @@ test('2D projection polygon outputs valid perimeter and crease points', () => {
     assert.ok(!isNaN(x) && !isNaN(y));
   });
 });
+
+test('Explicit gripper commands close on a corner, and release pins it where it was put', () => {
+  const sim = new ClothSimulator({ columns: 10, rows: 8 });
+  const corner = { x: -0.75, y: -0.6, z: 0.04 };
+  // An open gripper at the corner holds nothing.
+  sim.step({ targetA: corner, grips: [false, false] });
+  assert.equal(sim.captured[0], false);
+
+  sim.step({ targetA: corner, grips: [true, false] });
+  assert.equal(sim.captured[0], true, 'closing takes the corner');
+
+  // Carry the corner a little, then open without moving away: no
+  // releaseRadius travel is needed, and the pin lands where the corner is now.
+  const moved = { x: -0.7, y: -0.55, z: 0.04 };
+  for (let s = 0; s < 5; s += 1) sim.step({ targetA: moved, grips: [true, false] });
+  sim.step({ targetA: moved, grips: [false, false] });
+  assert.equal(sim.captured[0], false);
+  assert.equal(sim.released[0], true);
+  assert.ok(Math.abs(sim.tablePinA.x - moved.x) < 1e-3 && Math.abs(sim.tablePinA.y - moved.y) < 1e-3, 'pin is where the corner was released');
+});
+
+test('Without commands, a departing gripper pins the corner where it was carried, not where it was first grabbed', () => {
+  const sim = new ClothSimulator({ columns: 10, rows: 8 });
+  sim.step({ targetA: { x: -0.75, y: -0.6, z: 0.02 } });
+  const carried = { x: -0.65, y: -0.5, z: 0.02 };
+  for (let s = 0; s < 5; s += 1) sim.step({ targetA: carried });
+  sim.step({ targetA: { x: -0.65, y: -0.5, z: 0.9 } });
+  assert.equal(sim.released[0], true);
+  assert.ok(Math.abs(sim.tablePinA.x - carried.x) < 1e-3 && Math.abs(sim.tablePinA.y - carried.y) < 1e-3);
+});

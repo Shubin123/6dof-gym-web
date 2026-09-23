@@ -26,6 +26,26 @@ test('planTowelFoldMotion produces a valid collision-free bimanual folding traje
     previous = frame;
   }
 
+  // One gripper command per frame: both close on the corners, A opens before
+  // B lays the fold over its corner, and B holds to the end.
+  assert.equal(motion.grips.length, motion.frames.length);
+  const firstClosed = motion.grips.findIndex(([a, b]) => a && b);
+  assert.ok(firstClosed > 0, 'both grippers close');
+  const tipAt = (index, arm) => forwardKinematics(motion.frames[index][arm], arm ? ARM_B : ARM).points.at(-1);
+  assert.ok(distance(tipAt(firstClosed, 0), [250, 180, 4]) < 1.5, 'Arm A closes on the front-left corner');
+  assert.ok(distance(tipAt(firstClosed, 1), [400, 180, 4]) < 1.5, 'Arm B closes on the front-right corner');
+  const aOpens = motion.grips.findIndex(([a], index) => index > firstClosed && !a);
+  assert.ok(aOpens > firstClosed && motion.grips.slice(aOpens).every(([a, b]) => !a && b), 'A releases for good while B keeps hold');
+
+  // While B holds cloth its tool moves in short straight steps: no frame
+  // jumps, and it never wanders beyond the fold's own span.
+  for (let index = firstClosed + 1; index < motion.frames.length; index += 1) {
+    const step = distance(tipAt(index, 1), tipAt(index - 1, 1));
+    assert.ok(step < 4, `carried corner moved ${step.toFixed(1)} px in one frame`);
+    const [x, y, z] = tipAt(index, 1);
+    assert.ok(x > 245 && x < 405 && Math.abs(y - 180) < 2 && z < 60, `carried corner left the fold path at (${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)})`);
+  }
+
   const tipA = forwardKinematics(previous[0], ARM).points.at(-1);
   const tipB = forwardKinematics(previous[1], ARM_B).points.at(-1);
   assert.ok(distance(tipA, forwardKinematics(HOME_POSE, ARM).points.at(-1)) < 2, 'Arm A retracts clear after pinning');

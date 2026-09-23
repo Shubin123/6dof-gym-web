@@ -356,10 +356,13 @@ function advanceClothPhysics() {
     const tip = tipOf(armState);
     return { x: (tip[0] - 325) / 100, y: (tip[1] - 240) / 100, z: tip[2] / 100 };
   });
+  // The fold plan says when each gripper closes and opens; a manually driven
+  // arm has no such command and grasps by proximity instead.
+  const grips = state.policy.grips?.[state.policy.pathIndex - 1];
   // Two fixed cloth steps per 25 Hz command give the springs time to settle
   // between waypoints without making rendering cadence part of the dynamics.
   for (let substep = 0; substep < 2; substep += 1) {
-    state.cloth2d.step({ targetA: targets[0], targetB: targets[1] });
+    state.cloth2d.step({ targetA: targets[0], targetB: targets[1], grips });
   }
   const metrics = state.cloth2d.getFoldMetrics();
   state.policy.stageScore = scoreTaskStages(state.currentWorkflow, { cloth: state.cloth2d, tips: activeArms().map(tipOf) });
@@ -850,6 +853,7 @@ function loadWorkflow(id, { scroll = false } = {}) {
   state.armCount = workflow.arms || 1;
   state.activeArm = 0;
   state.policy.path = null;
+  state.policy.grips = null;
   state.policy.pathIndex = 0;
   state.policy.accumulator = 0;
   // The fold plan's own deterministic frame count (approach, pin, lift,
@@ -1064,6 +1068,7 @@ async function runPolicyPlanning(token) {
   state.policy.planning = false;
   state.policy.planningPhase = null;
   state.policy.path = motion.frames;
+  state.policy.grips = motion.grips || null;
   state.policy.pathIndex = 0;
   state.policy.status = HALT.RUNNING;
   state.policy.steps = 0;
@@ -1128,6 +1133,7 @@ function resetArms() {
   state.step = 0;
   state.safetyNotice = null;
   state.policy.path = null;
+  state.policy.grips = null;
   state.policy.pathIndex = 0;
   state.policy.accumulator = 0;
   state.policy.steps = 0;

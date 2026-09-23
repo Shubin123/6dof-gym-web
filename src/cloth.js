@@ -340,16 +340,49 @@ export class ClothSimulator {
     this.magnets.fill(0, m * 4, m * 4 + 4);
   }
 
-  /** Grasp / release state machine; returns the target each magnet should reach this step. */
-  _updateGrasps(targetA, targetB) {
+  /** First point bound to magnet `m`, or -1. */
+  _heldPoint(m) {
+    return this.pointMagnet.indexOf(m + 1);
+  }
+
+  /**
+   * Let go of magnet `m`. Arm A's corner stays pinned where it lies on the
+   * table - where the gripper actually put it, not where it first touched -
+   * so Arm B can lay the fold over it.
+   */
+  _release(m) {
+    this.captured[m] = false;
+    this.released[m] = true;
+    if (m !== 0) return;
+    const idx = this._heldPoint(0);
+    if (idx < 0) return;
+    this.tablePinA = { x: this.positions[idx * 3], y: this.positions[idx * 3 + 1], z: this.tableZ };
+  }
+
+  /**
+   * Grasp / release state machine; returns the target each magnet should
+   * reach this step. With explicit commands (`grips[m]` true = closed) a
+   * closing gripper takes the nearest graspable point within graspRadius and
+   * an opening one lets go. Without them (manual driving) grasps are inferred
+   * from proximity and a gripper departing past releaseRadius releases.
+   */
+  _updateGrasps(targetA, targetB, grips = []) {
     const targets = [targetA, targetB];
-    // A captured corner keeps its original contact point. Re-testing capture
-    // each frame would overwrite that point as the arm retracts, turning a
-    // deliberate release into an unrealistic "air-bending" tow.
     targets.forEach((target, m) => {
-      if (!target || this.released[m] || this.captured[m]) return;
+      const command = grips[m];
+      if (command === false && this.captured[m]) {
+        this._release(m);
+        return;
+      }
+      // Without a command, a captured corner keeps its original contact
+      // point: re-testing capture each frame would overwrite that point as
+      // the arm retracts, turning a release into an "air-bending" tow.
+      if (!target || this.captured[m] || command === false) return;
+      if (command === undefined && this.released[m]) return;
       const idx = this._nearestGraspable(target);
       if (idx < 0) return;
+      if (m === 0) this.tablePinA = null;
+      if (this._heldPoint(m) >= 0) this._deactivateMagnet(m);
       this.captured[m] = true;
       this.wasCaptured[m] = true;
       this.graspOrigins[m] = { x: target.x, y: target.y, z: target.z };
@@ -359,13 +392,9 @@ export class ClothSimulator {
     // The fold plan retracts Arm A after it has pressed the left edge to the
     // table. Treat a departing gripper as an explicit release, allowing the
     // table to hold that edge while Arm B places the fold over it.
-    if (this.captured[0] && targetA) {
+    if (grips[0] === undefined && this.captured[0] && targetA) {
       const origin = this.graspOrigins[0];
-      if (Math.hypot(origin.x - targetA.x, origin.y - targetA.y, origin.z - targetA.z) > this.releaseRadius) {
-        this.captured[0] = false;
-        this.released[0] = true;
-        this.tablePinA = { x: origin.x, y: origin.y, z: this.tableZ };
-      }
+      if (Math.hypot(origin.x - targetA.x, origin.y - targetA.y, origin.z - targetA.z) > this.releaseRadius) this._release(0);
     }
 
     const goals = [
@@ -385,11 +414,12 @@ export class ClothSimulator {
   /**
    * Advance one simulation step under current arm gripper targets.
    *
-   * @param {Object} targets - Gripper positions in cloth-local coordinates:
-   *                           { targetA: {x, y, z}, targetB: {x, y, z} }
+   * @param {Object} targets - Gripper positions in cloth-local coordinates,
+   *   { targetA: {x, y, z}, targetB: {x, y, z} }, and optionally explicit
+   *   gripper commands { grips: [closedA, closedB] }.
    */
   step(targets = {}) {
-    const goals = this._updateGrasps(targets.targetA, targets.targetB);
+    const goals = this._updateGrasps(targets.targetA, targets.targetB, targets.grips);
     for (let i = 0; i < this.numVertices; i += 1) this.invMass[i] = this.pointMagnet[i] ? 0 : 1;
 
     for (let sub = 1; sub <= this.substeps; sub += 1) {
