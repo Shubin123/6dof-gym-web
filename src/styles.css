@@ -86,7 +86,7 @@
 /* 2D Cloth SVG styles */
 .cloth-2d-base{fill:#49c7e8;fill-opacity:.85;stroke:#69d2df;stroke-width:1.5;stroke-linejoin:round;filter:drop-shadow(2px 4px 6px rgba(0,0,0,.4))}
 .cloth-2d-crease{stroke:#e1f9ff;stroke-width:1.5;stroke-dasharray:3 3;fill:none;opacity:.8}
-.cloth-2d-pin{fill:#ffbd4a;stroke:#101620;stroke-width:1.5}
+
 .cloth-2d-target{fill:#c9fb5d18;stroke:#c9fb5d;stroke-width:1.5;stroke-dasharray:5 4;pointer-events:none}
 .cloth-2d-target-label{fill:#c9fb5d;font:9px var(--mono);letter-spacing:.8px;pointer-events:none}
 
@@ -126,3 +126,15 @@
 .preview-actions{display:flex;gap:18px;padding-top:12px;border-top:1px solid #1e2836;margin-top:12px}
 @media(max-width:980px){.settings-body{grid-template-columns:1fr}.preview-panel{position:static;order:-1}}
 @media(max-width:560px){.settings-body{padding:28px 16px 60px}.settings-hero{padding:44px 16px 26px}.setting-row{grid-template-columns:minmax(0,1fr) 84px}.setting-row input[type="range"]{grid-column:1/-1;grid-row:2}.setting-description{grid-row:3}}
+.grip.closed{stroke-width:6}.grip-held{fill:#49c7e8;stroke:#e1f9ff;stroke-width:1.5}
+.fold-line{stroke:#e1f9ff;stroke-width:1.2;stroke-dasharray:6 5;opacity:.55;pointer-events:none}.fold-line-label{fill:#a6e6ef;font:8px var(--mono);letter-spacing:1px;opacity:.8}
+.fold-mark circle{fill:none;stroke-width:2}.fold-mark text{font:9px var(--mono);letter-spacing:.4px}
+.fold-mark[data-arm="A"] circle{stroke:#c9fb5d}.fold-mark[data-arm="A"] text{fill:#c9fb5d}.fold-mark[data-arm="B"] circle{stroke:#69d2df}.fold-mark[data-arm="B"] text{fill:#69d2df}
+.fold-mark.pending circle{stroke-dasharray:4 3;animation:fold-pulse 1.6s ease-in-out infinite}.fold-mark.held circle{fill:#ffffff14;stroke-width:2.5}
+.fold-mark.place circle{stroke:#69d2df;stroke-dasharray:3 3;fill:#69d2df14}.fold-mark.place text{fill:#69d2df}
+.fold-mark.done circle{stroke:#c9fb5d;fill:#c9fb5d26}.fold-mark.done path{fill:none;stroke:#c9fb5d;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.fold-pin circle{fill:#c9fb5d;stroke:#101620;stroke-width:1.5}
+.fold-arrow{fill:none;stroke:#69d2df;stroke-width:2;stroke-dasharray:6 4;pointer-events:none}.fold-arrowhead{fill:#69d2df}
+.fold-stage{fill:#f5f6f8;font:600 11px var(--sans);letter-spacing:.2px;paint-order:stroke;stroke:#101620;stroke-width:4px}
+@keyframes fold-pulse{50%{opacity:.45}}
+@media(prefers-reduced-motion:reduce){.fold-mark.pending circle{animation:none}}

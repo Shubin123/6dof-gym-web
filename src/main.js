@@ -4,6 +4,7 @@ import registry from '../data/sources.json';
 import { ARM, ARM_B, buildDatasetManifest, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, reduceSafeCellMotion, solveInverseKinematics } from './core.js';
 import { ClothSimulator } from './cloth.js';
 import { loadClothSettings, onClothSettingsChange } from './cloth-settings.js';
+import { FOLD_GUIDE, FOLD_STAGES, clothPointToScene, foldGuideStage } from './fold-guide.js';
 import { bootstrapPolicy, policyRecipeFor, scoreTaskStages } from './task-policies.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -313,10 +314,22 @@ function updateArms() {
       class: pointIndex === points.length - 1 ? 'joint small' : 'joint',
     })));
     const [x, y] = points.at(-1);
-    // The tool heading seen from above is the forward vector's ground projection.
-    const heading = Math.atan2(forward[1], forward[0]);
-    const spread = 0.35;
-    group.querySelector('.gripper').innerHTML = `<path class="grip" d="M${x} ${y} l${Math.cos(heading + spread) * 19} ${Math.sin(heading + spread) * 19} M${x} ${y} l${Math.cos(heading - spread) * 19} ${Math.sin(heading - spread) * 19}"/>`;
+    // Seen from above, the jaws run back from the tip along the tool's
+    // ground-projected forward vector (short when the tool points down) and
+    // meet at the tip, where they close on whatever they hold.
+    const [fx, fy] = forward;
+    const flat = Math.hypot(fx, fy) || 1;
+    const [nx, ny] = [-fy / flat, fx / flat];
+    const closed = gripping(index);
+    const back = 19;
+    const baseGap = 7;
+    const tipGap = closed ? 1.5 : 7;
+    const jaws = [-1, 1].map((side) => {
+      const from = [x - fx * back + nx * side * baseGap, y - fy * back + ny * side * baseGap];
+      const to = [x + nx * side * tipGap, y + ny * side * tipGap];
+      return `M${fmt(from[0], 1)} ${fmt(from[1], 1)} L${fmt(to[0], 1)} ${fmt(to[1], 1)}`;
+    }).join(' ');
+    group.querySelector('.gripper').innerHTML = `<path class="grip${closed ? ' closed' : ''}" d="${jaws}"/>${closed ? `<circle class="grip-held" cx="${fmt(x, 1)}" cy="${fmt(y, 1)}" r="4"/>` : ''}`;
   });
   updateGoals();
   updateCloth2D();
@@ -329,6 +342,9 @@ function updateCloth2D() {
   if (!clothGroup) return;
   const isFold = state.currentWorkflow.id === 'fold';
   setHidden(clothGroup, !isFold);
+  // The fold plan does not chase per-arm goal cubes; the fold guide below
+  // shows what each arm is doing instead.
+  setHidden($('#goals'), isFold);
   if (!isFold) return;
 
   const { basePoints, creasePoints } = state.cloth2d.get2DPolygons([325, 240], 100);
@@ -340,8 +356,42 @@ function updateCloth2D() {
     <text class="cloth-2d-target-label" x="287.5" y="318" text-anchor="middle">FOLDED TARGET</text>
     <path class="cloth-2d-base" d="${pathString(basePoints)}" />
     <path class="cloth-2d-crease" d="${creaseString(creasePoints)}" />
-    <circle class="cloth-2d-pin" cx="${fmt(basePoints[0][0], 1)}" cy="${fmt(basePoints[0][1], 1)}" r="4" />
+    ${foldGuideSvg()}
   `;
+}
+
+/** Task 7 guide: fold line, each arm's corner, and where B's corner goes next. */
+function foldGuideSvg() {
+  const cloth = state.cloth2d;
+  const stage = foldGuideStage(cloth);
+  const { cornerA, cornerB, foldX, place, farY } = FOLD_GUIDE;
+  const [ax, ay] = cloth.tablePinA ? [325 + cloth.tablePinA.x * 100, 240 + cloth.tablePinA.y * 100] : clothPointToScene(cloth, cloth.anchorsA[0]);
+  const [bx, by] = clothPointToScene(cloth, cloth.anchorsB[0]);
+  const ring = (x, y, arm, label, held) => `
+    <g class="fold-mark ${held ? 'held' : 'pending'}" data-arm="${arm}">
+      <circle cx="${fmt(x, 1)}" cy="${fmt(y, 1)}" r="11" />
+      <text x="${fmt(x, 1)}" y="${fmt(y - 17, 1)}" text-anchor="middle">${label}</text>
+    </g>`;
+  const marks = [];
+  if (stage === 'grasp') {
+    marks.push(ring(cornerA[0], cornerA[1], 'A', 'A grasp', cloth.captured[0]));
+    marks.push(ring(cornerB[0], cornerB[1], 'B', 'B grasp', cloth.captured[1]));
+  } else {
+    marks.push(stage === 'lift' ? ring(ax, ay, 'A', 'A pin', true) : `<g class="fold-pin"><circle cx="${fmt(ax, 1)}" cy="${fmt(ay, 1)}" r="5" /></g>`);
+  }
+  if (stage === 'lift' || stage === 'place') {
+    // B's corner is lifted over the fold line, so the arrow arcs away from the towel.
+    const arc = `M${fmt(bx, 1)} ${fmt(by, 1)} Q${foldX} ${fmt(Math.min(by, place[1]) - 45, 1)} ${place[0] + 6} ${place[1] - 4}`;
+    marks.push(`<path class="fold-arrow" d="${arc}" marker-end="url(#fold-arrowhead)" />`);
+    marks.push(`<g class="fold-mark place"><circle cx="${place[0]}" cy="${place[1]}" r="15" /><text x="${place[0] - 20}" y="${place[1] + 4}" text-anchor="end">B place</text></g>`);
+  }
+  if (stage === 'done') marks.push(`<g class="fold-mark done"><circle cx="${place[0]}" cy="${place[1]}" r="11" /><path d="M${place[0] - 5} ${place[1]}l4 4 7-8" /></g>`);
+  return `
+    <defs><marker id="fold-arrowhead" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="fold-arrowhead" /></marker></defs>
+    <line class="fold-line" x1="${foldX}" y1="${cornerA[1] - 6}" x2="${foldX}" y2="${farY + 6}" />
+    ${stage === 'grasp' ? `<text class="fold-line-label" x="${foldX}" y="${cornerA[1] - 12}" text-anchor="middle">FOLD LINE</text>` : ''}
+    ${marks.join('')}
+    <text class="fold-stage" x="96" y="112">${FOLD_STAGES[stage]}</text>`;
 }
 
 /**
@@ -517,18 +567,26 @@ function updateGoals() {
 
 function pushViewportState() {
   viewport.instance?.update({
-    arms: activeArms().map((armState) => ({
+    arms: activeArms().map((armState, index) => ({
       id: armState.arm.id,
       q: [...armState.q],
       goal: [...armState.goal],
+      gripping: gripping(index),
     })),
     taskId: state.currentWorkflow.id,
     policyProgress: state.policy.path?.length ? state.policy.pathIndex / state.policy.path.length : 0,
     clothSnapshot: state.cloth2d.snapshot(),
+    foldGuide: state.currentWorkflow.id === 'fold' ? {
+      stage: foldGuideStage(state.cloth2d),
+      cornerB: clothPointToScene(state.cloth2d, state.cloth2d.anchorsB[0]),
+      pinA: state.cloth2d.tablePinA ? [325 + state.cloth2d.tablePinA.x * 100, 240 + state.cloth2d.tablePinA.y * 100] : null,
+    } : null,
   });
 }
 
 const tipOf = (armState) => forwardKinematics(armState.q, armState.arm).points.at(-1);
+/** Whether arm `index` has a towel corner in its closed gripper. */
+const gripping = (index) => state.currentWorkflow.id === 'fold' && Boolean(state.cloth2d.captured[index]);
 const armError = (armState) => distance(tipOf(armState), armState.goal);
 
 function updateTelemetry() {

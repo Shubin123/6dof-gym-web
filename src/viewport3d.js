@@ -14,8 +14,11 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { ARM, ARM_B, clamp, forwardKinematics, GOAL_Z } from './core.js';
 import { ClothSimulator } from './cloth.js';
+import { FOLD_GUIDE } from './fold-guide.js';
 
 const PX = 100; // scene pixels per world unit
+/** Half the finger gap, world units: open, and closed on a towel corner. */
+const GRIPPER_GAP = Object.freeze({ open: 0.09, closed: 0.025 });
 const UP = new THREE.Vector3(0, 1, 0);
 const FORWARD = new THREE.Vector3(1, 0, 0);
 const COLORS = {
@@ -32,7 +35,7 @@ const COLORS = {
 };
 
 /** Scene pixels to world units. The arm's z is a real height, not a decoration. */
-const toWorld = ([x, y, z = 0], origin = ARM.base) => new THREE.Vector3((x - origin[0]) / PX, z / PX, (y - origin[1]) / PX);
+export const toWorld = ([x, y, z = 0], origin = ARM.base) => new THREE.Vector3((x - origin[0]) / PX, z / PX, (y - origin[1]) / PX);
 
 function makeWorkspaceFloor(workspace) {
   const [minX, maxX, minY, maxY] = workspace.goal_workspace;
@@ -113,20 +116,26 @@ function makeArm(arm) {
     joints.push(joint);
   }
 
+  // The tool frame's origin is the kinematic tip - the grasp point - with +x
+  // along the tool. The fingers end there, so whatever the gripper holds sits
+  // between the fingertips rather than out at the wrist.
   const tool = new THREE.Group();
   const fingerMaterial = new THREE.MeshStandardMaterial({ color: COLORS.goal, roughness: 0.4, metalness: 0.2 });
-  [-1, 1].forEach((side) => {
-    const finger = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.05, 0.05), fingerMaterial);
-    finger.position.set(0.11, 0, side * 0.09);
+  const fingers = [-1, 1].map((side) => {
+    const finger = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.05, 0.04), fingerMaterial);
+    finger.position.set(-0.11, 0, side * GRIPPER_GAP.open);
+    finger.userData.side = side;
     finger.castShadow = true;
     tool.add(finger);
+    return finger;
   });
   const wrist = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.16, 16), jointMaterial);
   wrist.rotation.z = Math.PI / 2;
+  wrist.position.x = -0.28;
   tool.add(wrist);
   group.add(tool);
 
-  return { arm, group, links, joints, tool, column };
+  return { arm, group, links, joints, tool, fingers, column };
 }
 
 function makeGoal(mirrored) {
@@ -174,8 +183,70 @@ function makeGoal(mirrored) {
   return { group, cube, beam, grip, handles, handleMaterial };
 }
 
+/**
+ * Task 7's guide in 3-D, matching the 2-D one: a ring on each grasped corner,
+ * the fold line on the table, and the arc Arm B's corner follows over it to
+ * where it is laid down. Shown instead of the generic goal cubes.
+ */
+function makeFoldGuide() {
+  const group = new THREE.Group();
+  const flatRing = (radius, color) => {
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(radius, 0.012, 10, 40),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95 }),
+    );
+    ring.rotation.x = -Math.PI / 2;
+    group.add(ring);
+    return ring;
+  };
+  const ringA = flatRing(0.11, COLORS.linkAlt);
+  const ringB = flatRing(0.11, COLORS.linkB);
+  const place = flatRing(0.15, COLORS.linkB);
+  const pin = new THREE.Mesh(new THREE.SphereGeometry(0.045, 14, 10), new THREE.MeshBasicMaterial({ color: COLORS.linkAlt }));
+  group.add(pin);
+
+  const dashed = (color, points) => {
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(points),
+      new THREE.LineDashedMaterial({ color, dashSize: 0.06, gapSize: 0.045, transparent: true, opacity: 0.9 }),
+    );
+    line.computeLineDistances();
+    group.add(line);
+    return line;
+  };
+  const { cornerA, foldX, farY } = FOLD_GUIDE;
+  dashed(0xe1f9ff, [toWorld([foldX, cornerA[1] - 6, 3]), toWorld([foldX, farY + 6, 3])]).material.opacity = 0.5;
+  const arc = dashed(COLORS.linkB, new Array(33).fill(null).map(() => new THREE.Vector3()));
+  group.visible = false;
+  return { group, ringA, ringB, place, pin, arc };
+}
+
+/** Place the fold guide for the stage the towel is at (see fold-guide.js). */
+function layoutFoldGuide(guide, stage, cornerB, pinA) {
+  const { cornerA, cornerB: restB, place } = FOLD_GUIDE;
+  const onTable = ([x, y]) => toWorld([x, y, 2.5]);
+  guide.ringA.visible = stage === 'grasp' || stage === 'lift';
+  guide.ringA.position.copy(onTable(stage === 'lift' && pinA ? pinA : cornerA));
+  guide.ringB.visible = stage === 'grasp';
+  guide.ringB.position.copy(onTable(restB));
+  guide.pin.visible = stage === 'place' || stage === 'done';
+  guide.pin.position.copy(onTable(pinA || cornerA));
+  guide.place.visible = stage !== 'grasp';
+  guide.place.position.copy(onTable(place));
+  guide.place.material.color.setHex(stage === 'done' ? COLORS.linkAlt : COLORS.linkB);
+  guide.arc.visible = stage === 'lift' || stage === 'place';
+  if (guide.arc.visible) {
+    const from = toWorld(cornerB);
+    const to = onTable(place);
+    const peak = from.clone().lerp(to, 0.5).setY(Math.max(from.y, to.y) + 0.55);
+    const curve = new THREE.QuadraticBezierCurve3(from, peak, to);
+    guide.arc.geometry.setFromPoints(curve.getPoints(32));
+    guide.arc.computeLineDistances();
+  }
+}
+
 /** Spring-network cloth (see src/cloth.js) for the task-07 demonstration. */
-function makeCloth() {
+export function makeCloth() {
   const simulator = new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2 });
   const geometry = new THREE.PlaneGeometry(simulator.width, simulator.height, simulator.columns, simulator.rows);
   const material = new THREE.MeshStandardMaterial({
@@ -201,13 +272,33 @@ function makeCloth() {
     new THREE.PlaneGeometry(simulator.width / 2, simulator.height),
     new THREE.MeshBasicMaterial({ color: COLORS.linkAlt, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false }),
   );
-  foldTarget.position.set(-simulator.width / 4, 0, simulator.thickness * 1.5);
+  foldTarget.rotation.x = -Math.PI / 2;
+  foldTarget.position.set(-simulator.width / 4, simulator.tableZ + 0.002, 0);
   group.add(foldTarget);
-  group.rotation.x = -Math.PI / 2;
-  group.position.copy(toWorld([325, 240, 4]));
+  // The simulator's local frame is scene-aligned (x right, y toward the
+  // front edge the grippers take, z up); the group sits at the towel centre
+  // on the table and syncClothGeometry maps (x, y, z) -> world (x, z, y).
+  // A rotated group mirrors y, drawing the grasped corners on the far edge.
+  group.position.copy(toWorld([325, 240, 0]));
   group.add(mesh, grid);
   group.visible = false;
-  return { group, geometry, simulator, taskId: null };
+  const cloth = { group, geometry, simulator, taskId: null };
+  syncClothGeometry(cloth);
+  return cloth;
+}
+
+/** Copy the simulator's points into the towel mesh in world axes. */
+export function syncClothGeometry(cloth) {
+  const source = cloth.simulator.positions;
+  const target = cloth.geometry.attributes.position.array;
+  for (let i = 0; i < source.length; i += 3) {
+    target[i] = source[i];
+    target[i + 1] = source[i + 2];
+    target[i + 2] = source[i + 1];
+  }
+  cloth.geometry.attributes.position.needsUpdate = true;
+  cloth.geometry.computeVertexNormals();
+  cloth.geometry.computeBoundingSphere();
 }
 
 export function createViewport3D(container, { workspace, onGoalPick, onGoalHeight, onClothFrame }) {
@@ -258,6 +349,8 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
   });
   const cloth = makeCloth();
   scene.add(cloth.group);
+  const foldGuide = makeFoldGuide();
+  scene.add(foldGuide.group);
   const motionLines = rigs.map((rig) => {
     const geometry = new THREE.BufferGeometry();
     const line = new THREE.Line(geometry, new THREE.LineDashedMaterial({ color: rig.arm.mirror ? COLORS.linkB : COLORS.linkAlt, dashSize: 0.12, gapSize: 0.08, transparent: true, opacity: 0.8 }));
@@ -384,6 +477,11 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
 
   function layoutCloth() {
     cloth.group.visible = current.taskId === 'fold';
+    foldGuide.group.visible = cloth.group.visible && Boolean(current.foldGuide);
+    if (foldGuide.group.visible) {
+      const { stage, cornerB, pinA } = current.foldGuide;
+      layoutFoldGuide(foldGuide, stage, cornerB, pinA);
+    }
     if (!cloth.group.visible) {
       cloth.taskId = null;
       return;
@@ -398,10 +496,7 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     // the timeline scrubber aligned frame-for-frame.
     if (!current.clothSnapshot) return;
     cloth.simulator.restore(current.clothSnapshot);
-
-    cloth.geometry.attributes.position.array.set(cloth.simulator.positions);
-    cloth.geometry.attributes.position.needsUpdate = true;
-    cloth.geometry.computeVertexNormals();
+    syncClothGeometry(cloth);
   }
 
   function layoutArm(rig, armState) {
@@ -424,6 +519,8 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     rig.tool.position.copy(tip);
     // Scene axes are (x, depth, height); the world's are (x, height, depth).
     rig.tool.quaternion.setFromUnitVectors(FORWARD, new THREE.Vector3(forward[0], forward[2], forward[1]).normalize());
+    const closed = Boolean(armState.gripping);
+    rig.fingers.forEach((finger) => { finger.position.z = finger.userData.side * (closed ? GRIPPER_GAP.closed : GRIPPER_GAP.open); });
 
     const goal = toWorld(armState.goal);
     rig.goal.group.position.set(goal.x, 0, goal.z);
@@ -440,7 +537,7 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     const motionLine = motionLines[rig.arm.id === 'B' ? 1 : 0];
     motionLine.geometry.setFromPoints(curve.getPoints(32));
     motionLine.computeLineDistances();
-    motionLine.visible = true;
+    motionLine.visible = current.taskId !== 'fold';
   }
 
   function layout() {
@@ -448,8 +545,10 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
       const armState = current.arms[index];
       const visible = Boolean(armState);
       rig.group.visible = visible;
-      rig.goal.group.visible = visible;
-      motionLines[index].visible = visible;
+      // The fold plan does not chase goal cubes; the fold guide replaces them.
+      const showGoal = visible && current.taskId !== 'fold';
+      rig.goal.group.visible = showGoal;
+      motionLines[index].visible = showGoal;
       if (visible) layoutArm(rig, armState);
     });
     layoutCloth();
@@ -470,9 +569,7 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     restoreCloth(snapshot) {
       if (cloth?.simulator && snapshot) {
         cloth.simulator.restore(snapshot);
-        cloth.geometry.attributes.position.array.set(cloth.simulator.positions);
-        cloth.geometry.attributes.position.needsUpdate = true;
-        cloth.geometry.computeVertexNormals();
+        syncClothGeometry(cloth);
       }
     },
     getClothSnapshot() {
@@ -481,9 +578,7 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     resetCloth() {
       if (cloth?.simulator) {
         cloth.simulator.reset();
-        cloth.geometry.attributes.position.array.set(cloth.simulator.positions);
-        cloth.geometry.attributes.position.needsUpdate = true;
-        cloth.geometry.computeVertexNormals();
+        syncClothGeometry(cloth);
       }
     },
     dispose() {
