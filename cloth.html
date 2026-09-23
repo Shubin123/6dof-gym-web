@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Tune the towel cloth physics used by the ArmLab fold task, with a live preview." />
+    <title>Cloth Settings — ArmLab</title>
+  </head>
+  <body>
+    <main class="settings-page">
+      <header class="topbar">
+        <a class="brand" href="./index.html#top">ARM<span>LAB</span></a>
+        <nav aria-label="Primary navigation">
+          <a href="./index.html#demo">Live lab</a><a href="./index.html#workflows">Examples</a><a href="./index.html#models">Models</a><a href="./index.html#data">Data</a><a href="./cloth.html" aria-current="page">Cloth settings</a>
+        </nav>
+        <span class="status"><i></i> Browser runtime</span>
+      </header>
+
+      <section class="settings-hero">
+        <p class="eyebrow">SETTINGS · TASK 07 TOWEL</p>
+        <h1>Cloth physics</h1>
+        <p class="lede">These values drive the towel in the live lab's fold task. Changes save in this browser as you make them and reach an open lab tab straight away, even mid-episode.</p>
+      </section>
+
+      <section class="settings-body">
+        <form id="cloth-settings" class="settings-form" autocomplete="off" novalidate>
+          <div id="settings-groups"></div>
+          <div class="settings-actions">
+            <button type="button" id="settings-reset" class="button compact ghost">Reset to defaults</button>
+            <span id="settings-saved" class="settings-saved" role="status" aria-live="polite">Defaults</span>
+          </div>
+        </form>
+
+        <aside class="preview-panel" aria-label="Cloth preview">
+          <div class="scene-label"><span>PREVIEW · SCRIPTED FOLD</span><span id="preview-phase">grasp</span></div>
+          <canvas id="preview" class="preview-canvas" width="640" height="420" role="img" aria-label="Towel being folded in half by two grippers"></canvas>
+          <dl class="preview-metrics">
+            <div><dt>Stretch now</dt><dd id="metric-stretch">—</dd></div>
+            <div><dt>Peak this run</dt><dd id="metric-peak">—</dd></div>
+            <div><dt>Fold distance</dt><dd id="metric-fold">—</dd></div>
+            <div><dt>Solver cost</dt><dd id="metric-cost">—</dd></div>
+          </dl>
+          <div class="stability" id="stability">
+            <div class="bar-label"><span>Stiffness load</span><span id="stability-value">—</span></div>
+            <div class="bar stability-bar"><i id="stability-bar"></i></div>
+            <p class="stability-note" id="stability-note"></p>
+          </div>
+          <div class="preview-actions">
+            <button type="button" id="preview-restart" class="icon-button">↻ Restart fold</button>
+            <button type="button" id="preview-pause" class="icon-button">❚❚ Pause</button>
+          </div>
+        </aside>
+      </section>
+
+      <footer><span>ArmLab / 6‑DOF Gym</span><span>Static browser demo · not a hardware controller</span></footer>
+    </main>
+    <script type="module" src="/src/cloth-page.js"></script>
+  </body>
+</html>

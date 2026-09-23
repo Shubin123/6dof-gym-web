@@ -3,6 +3,7 @@ import compiled from '../data/compiled.json';
 import registry from '../data/sources.json';
 import { ARM, ARM_B, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, reduceSafeCellMotion, solveInverseKinematics } from './core.js';
 import { ClothSimulator } from './cloth.js';
+import { loadClothSettings, onClothSettingsChange } from './cloth-settings.js';
 import { bootstrapPolicy, policyRecipeFor, scoreTaskStages } from './task-policies.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -45,7 +46,8 @@ const state = {
   // frame history stores whichever simulator's snapshot was available, and
   // restore() does a raw Float32Array.set() into this instance, so a size
   // mismatch throws when scrubbing the timeline.
-  cloth2d: new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2 }),
+  // Physics values come from the cloth settings page (cloth.html).
+  cloth2d: new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2, ...loadClothSettings() }),
   timeline: { currentStep: 0, totalSteps: 0, scrubbing: false },
 };
 
@@ -824,6 +826,7 @@ function loadWorkflow(id, { scroll = false } = {}) {
   $('#policy-budget-value').textContent = state.policy.budget;
   $('#policy-profile').textContent = policyRecipeFor(workflow).label;
   setHidden($('#cloth-status'), workflow.id !== 'fold');
+  setHidden($('#cloth-settings-link'), workflow.id !== 'fold');
   $('#cloth-status').textContent = 'Cloth frames 0 / 120';
   state.cloth2d?.reset();
   viewport.instance?.resetCloth?.();
@@ -1204,6 +1207,9 @@ function installListeners() {
     state.modelFilter = route;
     renderModels();
   });
+  // Tuning on the cloth settings page (usually another tab) takes effect on
+  // the next cloth step without resetting the towel.
+  onClothSettingsChange((settings) => state.cloth2d.configure(settings));
   $('#run-policy').addEventListener('click', () => {
     if (state.policy.status === HALT.RUNNING || state.policy.planning) haltPolicy(HALT.OPERATOR);
     else startPolicy();

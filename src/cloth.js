@@ -67,6 +67,13 @@ export const DEFAULT_CLOTH_CONFIG = Object.freeze({
   settleDisplacementLimit: 0.003,
 });
 
+/** Parameters that may change on a live simulator; the rest fix the mesh. */
+export const CLOTH_PHYSICS_KEYS = Object.freeze([
+  'thickness', 'gravity', 'damping', 'staticFriction', 'kineticFriction', 'substeps',
+  'stretchStiffness', 'shearStiffness', 'bendStiffness', 'maxForce', 'springDamping',
+  'graspRadius', 'releaseRadius',
+]);
+
 const SPRING_STRETCH = 0;
 const SPRING_SHEAR = 1;
 const SPRING_BEND = 2;
@@ -187,28 +194,8 @@ function gridMesh(columns, rows, width, height, z) {
 export class ClothSimulator {
   constructor(options = {}) {
     this.config = { ...DEFAULT_CLOTH_CONFIG, ...options };
-    Object.assign(this, {
-      columns: this.config.columns,
-      rows: this.config.rows,
-      width: this.config.width,
-      height: this.config.height,
-      thickness: this.config.thickness,
-      tableZ: this.config.tableZ,
-      gravity: this.config.gravity,
-      damping: this.config.damping,
-      staticFriction: this.config.staticFriction,
-      kineticFriction: this.config.kineticFriction,
-      substeps: this.config.substeps,
-      stretchStiffness: this.config.stretchStiffness,
-      shearStiffness: this.config.shearStiffness,
-      bendStiffness: this.config.bendStiffness,
-      maxForce: this.config.maxForce,
-      springDamping: this.config.springDamping,
-      graspRadius: this.config.graspRadius,
-      releaseRadius: this.config.releaseRadius,
-      historyLimit: this.config.historyLimit,
-      settleDisplacementLimit: this.config.settleDisplacementLimit,
-    });
+    const { columns, rows, width, height, tableZ, historyLimit, settleDisplacementLimit } = this.config;
+    Object.assign(this, { columns, rows, width, height, tableZ, historyLimit, settleDisplacementLimit });
 
     const mesh = gridMesh(this.columns, this.rows, this.width, this.height, this.tableZ);
     const topology = buildClothTopology(mesh.positions, mesh.index);
@@ -241,9 +228,8 @@ export class ClothSimulator {
     this.graspable = new Uint8Array(this.numVertices);
     for (const idx of [...this.anchorsA, ...this.anchorsB]) this.graspable[idx] = 1;
 
-    const stiffnessOf = [this.stretchStiffness, this.shearStiffness, this.bendStiffness];
-    for (let s = 0; s < this.numSprings; s += 1) this.springStiffness[s] = stiffnessOf[this.springKinds[s]];
     this._calculateRestLengths();
+    this.configure(this.config);
 
     // Flat [i, j, restLength] views by kind, for metrics and inspection.
     this.structuralSprings = this._springList(SPRING_STRETCH);
@@ -251,6 +237,41 @@ export class ClothSimulator {
     this.bendingSprings = this._springList(SPRING_BEND);
 
     this.reset();
+  }
+
+  /**
+   * Apply physical parameters (any subset of CLOTH_PHYSICS_KEYS) without
+   * disturbing the cloth's state, so settings can be tuned mid-episode.
+   * Mesh size and resolution are fixed at construction.
+   */
+  configure(params = {}) {
+    for (const key of CLOTH_PHYSICS_KEYS) {
+      if (Number.isFinite(params[key])) {
+        this[key] = params[key];
+        this.config[key] = params[key];
+      }
+    }
+    this.substeps = Math.max(1, Math.round(this.substeps));
+    const stiffnessOf = [this.stretchStiffness, this.shearStiffness, this.bendStiffness];
+    for (let s = 0; s < this.numSprings; s += 1) this.springStiffness[s] = stiffnessOf[this.springKinds[s]];
+    return this;
+  }
+
+  /**
+   * Largest summed spring stiffness at any point. The explicit update is
+   * stable while this stays under roughly 4; past it the cloth jitters and
+   * the maxForce clamp is all that holds it together.
+   */
+  getStiffnessLoad() {
+    const { springPointer, springsPerPoint } = this.topology;
+    let load = 0;
+    for (let i = 0; i < this.numVertices; i += 1) {
+      const start = springPointer[i];
+      let sum = 0;
+      for (let k = start + 1; k <= start + springsPerPoint[start]; k += 1) sum += this.springStiffness[springsPerPoint[k]];
+      load = Math.max(load, sum);
+    }
+    return load;
   }
 
   _calculateRestLengths() {
