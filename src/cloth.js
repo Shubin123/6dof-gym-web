@@ -355,8 +355,20 @@ export class ClothSimulator {
 
       // Self-collision / fold layer separation:
       // When right-hand particles (c > columns / 2) fold over left-hand particles (c <= columns / 2),
-      // enforce thickness separation z_right >= z_left + thickness.
+      // enforce thickness separation z_right >= z_left + thickness. Snapping
+      // straight to minZ on every iteration fights the structural springs at
+      // the fold line - each full snap overshoots, the spring pulls the
+      // vertex back, and the pair never reaches a joint equilibrium (this
+      // measured as stretch-error spikes past 3x rest length during a fast
+      // cross-over, never settling). Capping how far a single iteration may
+      // move a vertex - rather than snapping it exactly - is the same fix
+      // bandinopla/three-simplecloth (MIT license,
+      // https://github.com/bandinopla/three-simplecloth) uses for its spring
+      // and collision forces (a per-step maxForce clamp); applied here to a
+      // position correction instead of a force, it lets the constraint
+      // converge over a few iterations instead of fighting the springs in one.
       const halfCol = this.columns / 2;
+      const selfCollisionMaxStep = 0.008;
       for (let r = 0; r <= this.rows; r += 1) {
         for (let c1 = 0; c1 <= halfCol; c1 += 1) {
           const i1 = r * (this.columns + 1) + c1;
@@ -376,7 +388,7 @@ export class ClothSimulator {
             if (horizDist < 0.12) {
               const minZ = z1 + this.thickness;
               if (z2 < minZ && this.invMass[i2] > 0) {
-                this.positions[p2 + 2] = minZ;
+                this.positions[p2 + 2] += Math.min(minZ - z2, selfCollisionMaxStep);
               }
             }
           }

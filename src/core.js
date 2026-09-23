@@ -500,7 +500,12 @@ export function planTowelFoldMotion(poses, safety = {}, profile = {}) {
   const liftHeight = profile.liftHeight ?? 45;
   const crossHeight = profile.crossHeight ?? 38;
   const placeHeight = profile.placeHeight ?? 6;
-  const settleFrames = profile.settleFrames ?? 4;
+  // The cloth solver needs on the order of 40-50 idle frames after the final
+  // placement to relax out of the transient overstretch a fast cross-over
+  // leaves behind (see cloth.js's self-collision relaxation comment) and
+  // reach a stable, genuinely folded rest state - a handful of frames looks
+  // identical to "still mid-fold" when the run ends.
+  const settleFrames = profile.settleFrames ?? 50;
   const liftWaypoint = [380, 180, liftHeight];
   const liftPlan = solveInverseKinematics(liftWaypoint, armB, safety, [{ q: curA, arm: armA }]);
   if (!liftPlan?.safety?.safe) return null;

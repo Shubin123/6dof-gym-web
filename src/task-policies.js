@@ -17,7 +17,7 @@ export const TASK_POLICY_RECIPES = Object.freeze({
     label: 'Cloth-aware warm-start',
     kind: 'cloth-fold',
     training: 'Synthetic cloth calibration',
-    profile: Object.freeze({ liftHeight: 45, crossHeight: 38, placeHeight: 6, settleFrames: 4 }),
+    profile: Object.freeze({ liftHeight: 45, crossHeight: 38, placeHeight: 6, settleFrames: 50 }),
     stages: Object.freeze([
       Object.freeze({ id: 'contact', label: 'secure both corners', weight: 0.18 }),
       Object.freeze({ id: 'pin', label: 'pin and release left edge', weight: 0.18 }),

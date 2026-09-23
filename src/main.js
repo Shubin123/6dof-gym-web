@@ -11,6 +11,11 @@ const fmt = (value, digits = 2) => Number(value).toFixed(digits);
 const JOINT_LABELS = ['Yaw', 'Pitch', 'Pitch', 'Yaw', 'Pitch', 'Roll'];
 const jointLimitOf = (index) => (index === 0 ? ARM.yawLimit : ARM.jointLimit);
 const ARMS = [ARM, ARM_B];
+// Ceiling for the Step budget slider and the fold task's default budget.
+// Raised from the old flat 400 because the fold plan's own settle tail (see
+// core.js's planTowelFoldMotion) needs ~477 steps to finish; keep this in
+// sync with index.html's #policy-budget max attribute.
+const FOLD_STEP_BUDGET = 500;
 
 const makeArmState = (arm) => ({
   arm,
@@ -807,7 +812,12 @@ function loadWorkflow(id, { scroll = false } = {}) {
   state.policy.path = null;
   state.policy.pathIndex = 0;
   state.policy.accumulator = 0;
-  state.policy.budget = workflow.id === 'fold' ? 400 : workflow.horizon_steps;
+  // The fold plan's own deterministic frame count (approach, pin, lift,
+  // retract, cross, place, then a settle tail long enough for the cloth
+  // solver to relax) currently runs to ~477 steps; give it enough budget to
+  // finish without truncating the settle tail, matching the raised ceiling
+  // in policyBudget() and the slider's max in index.html.
+  state.policy.budget = workflow.id === 'fold' ? FOLD_STEP_BUDGET : workflow.horizon_steps;
   state.policy.loop = workflow.id === 'fold';
   $('#policy-loop').checked = state.policy.loop;
   $('#policy-budget').value = state.policy.budget;
@@ -863,7 +873,12 @@ function renderHaltState() {
 /** Advance one prevalidated floor- and collision-safe control frame. */
 function policyStep() {
   const next = state.policy.path?.[state.policy.pathIndex];
-  if (!next) return HALT.SAFETY;
+  // Every frame in state.policy.path already passed evaluateCellSafety when
+  // it was planned (planSafeCellMotion / reduceSafeCellMotion /
+  // planTowelFoldMotion), so running out of frames means the plan finished
+  // safely, not that anything was unsafe - report it as reached rather than
+  // a safety halt.
+  if (!next) return HALT.REACHED;
   // Validate a live frame before state changes. This defense-in-depth check
   // prevents a malformed path from teleporting an arm between safe poses.
   const exceedsJointStep = next.some((q, index) => q.some((value, joint) => (
@@ -895,11 +910,21 @@ function policyStep() {
   };
   updateTimelineSlider();
 
-  if (state.currentWorkflow.id === 'fold' && state.policy.stageScore?.complete) return HALT.REACHED;
+  // The fold task's per-arm goal only marks where each gripper starts (the
+  // corner it grasps); the choreography then carries it well away from that
+  // point (lift, cross the fold line, place, retract). Both arms briefly
+  // sitting near their starting goals right after the approach phase would
+  // satisfy the generic distance check long before any folding happens, so
+  // fold runs to the end of its own deterministic, pre-validated plan
+  // instead - reached via the frame-exhaustion check above, bounded by the
+  // step budget below like any other task.
+  if (state.currentWorkflow.id === 'fold') {
+    return state.policy.steps >= policyBudget() ? HALT.BUDGET : HALT.RUNNING;
+  }
   return haltState({ error, steps: state.policy.steps, budget: policyBudget() });
 }
 
-const policyBudget = () => clamp(Math.round(state.policy.budget), 1, 400);
+const policyBudget = () => clamp(Math.round(state.policy.budget), 1, FOLD_STEP_BUDGET);
 
 /**
  * Advance the run by `speed` control steps per animation frame.

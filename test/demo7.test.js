@@ -75,7 +75,12 @@ test('Realistic cloth physics interacts with Demo 7 folding trajectory', () => {
     safety,
   );
 
-  const cloth = new ClothSimulator({ columns: 12, rows: 9, width: 1.5, height: 1.2 });
+  // Matches the production grid (src/main.js's cloth2d, src/viewport3d.js's
+  // makeCloth) rather than an arbitrary resolution: a coarser grid converged
+  // fine here while the shipped 14x11 mesh was still visibly unstable, which
+  // is exactly how the premature-halt/no-settle-time regression this test
+  // now guards against went unnoticed.
+  const cloth = new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2 });
   assert.equal(cloth.captured[0], false);
   assert.equal(cloth.captured[1], false);
 
