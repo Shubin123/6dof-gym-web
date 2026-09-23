@@ -41,7 +41,7 @@
 .scene-label b{color:var(--lime);font-weight:500}
 .policy-bar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:12px 2px 0;border-top:1px solid #1e2836;margin-top:11px}
 .halt-state{font:10px var(--mono);letter-spacing:.4px;padding:5px 10px;border:1px solid #334054;color:#9ba6b7}
-.halt-state.running{border-color:#c9fb5d;color:#c9fb5d}.halt-state.reached{border-color:#79c845;color:#a9e87a}.halt-state.budget{border-color:#c08a3a;color:#ffbd4a}.halt-state.operator,.halt-state.safety{border-color:#8d5a4a;color:#e0a08c}
+.halt-state.running,.halt-state.planning{border-color:#c9fb5d;color:#c9fb5d}.halt-state.planning::before{content:'◌';display:inline-block;margin-right:5px;animation:solver-spin 1s linear infinite}.halt-state.reached{border-color:#79c845;color:#a9e87a}.halt-state.budget{border-color:#c08a3a;color:#ffbd4a}.halt-state.operator,.halt-state.safety{border-color:#8d5a4a;color:#e0a08c}
 .policy-profile{font:10px var(--mono);color:#b8c6d8}.policy-profile::before{content:'●';color:#c9fb5d;margin-right:5px}
 .cloth-status{font:10px var(--mono);color:#a6e6ef}
 .policy-budget,.policy-speed{display:flex;align-items:center;gap:9px;font:10px var(--mono);color:#9ba6b7}
@@ -92,9 +92,11 @@
 .policy-run-container{display:flex;flex-direction:column;align-items:center;gap:5px}
 .policy-progress-wrap{display:flex;align-items:center;gap:6px;width:100%;min-width:150px;opacity:.7;transition:opacity .2s ease}
 .policy-progress-wrap.running{opacity:1}
+.policy-progress-wrap.planning{opacity:1}.policy-progress-wrap.planning .policy-progress-fill{width:38%!important;animation:solver-sweep 1.1s ease-in-out infinite;background:linear-gradient(90deg,#38bdf8,#c9fb5d,#38bdf8)}
 .policy-progress-wrap.reached .policy-progress-fill{background:linear-gradient(90deg,#79c845,#c9fb5d);box-shadow:0 0 8px rgba(121,200,69,.7)}
 .policy-progress-track{flex:1;height:5px;background:#141c28;border:1px solid #233144;border-radius:3px;overflow:hidden;position:relative}
 .policy-progress-fill{height:100%;width:0%;background:linear-gradient(90deg,#38bdf8,#c9fb5d);border-radius:3px;transition:width .08s ease-out;box-shadow:0 0 6px rgba(201,251,93,.45)}
 .policy-progress-label{font:9px var(--mono);color:#c9fb5d;min-width:26px;text-align:right;letter-spacing:.3px}
 .solver-ticker{font:9px var(--mono);color:#6f8199;letter-spacing:.2px;opacity:.75;transition:opacity .2s ease,color .2s ease}
 .solver-ticker.running{color:#c9fb5d;opacity:1}
+@keyframes solver-spin{to{transform:rotate(360deg)}}@keyframes solver-sweep{0%{transform:translateX(-70%)}50%{transform:translateX(130%)}100%{transform:translateX(-70%)}}

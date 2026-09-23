@@ -31,7 +31,7 @@ const state = {
   replaying: false,
   familyFilter: 'all',
   modelFilter: 'all',
-  policy: { status: HALT.IDLE, steps: 0, speed: 1, budget: compiled.workflows[0].horizon_steps, loop: false, frame: null, accumulator: 0, restart: null, path: null, pathIndex: 0, solveStartedAt: null },
+  policy: { status: HALT.IDLE, steps: 0, speed: 1, budget: compiled.workflows[0].horizon_steps, loop: false, frame: null, accumulator: 0, restart: null, path: null, pathIndex: 0, solveStartedAt: null, planning: false, planningToken: 0 },
   safetyNotice: null,
   voice: { dataUrl: null, mimeType: null, transcript: '', audioUrl: null, recorder: null, recognition: null, stream: null, bytes: 0, captureTimeout: null },
   frameHistory: [],
@@ -390,13 +390,16 @@ function updatePolicyProgressBar() {
 
   const total = state.policy.path?.length || policyBudget();
   const current = state.policy.steps || 0;
-  const pct = computePolicyProgress(current, total);
+  const planning = state.policy.planning;
+  const pct = planning ? 18 : computePolicyProgress(current, total);
 
   fill.style.width = `${pct}%`;
-  if (label) label.textContent = `${pct}%`;
+  if (label) label.textContent = planning ? 'search' : `${pct}%`;
   if (wrap) {
     wrap.setAttribute('aria-valuenow', String(pct));
+    wrap.setAttribute('aria-busy', String(planning));
     wrap.classList.toggle('running', state.policy.status === HALT.RUNNING);
+    wrap.classList.toggle('planning', planning);
     wrap.classList.toggle('reached', state.policy.status === HALT.REACHED);
   }
   updateSolverTicker();
@@ -411,10 +414,13 @@ function updatePolicyProgressBar() {
 function updateSolverTicker() {
   const el = $('#solver-ticker');
   if (!el) return;
+  const planning = state.policy.planning;
   const total = state.policy.path?.length || (state.policy.status === HALT.RUNNING ? policyBudget() : 0);
   const elapsedMs = state.policy.solveStartedAt !== null ? performance.now() - state.policy.solveStartedAt : 0;
-  el.textContent = formatSolverTicker({ steps: state.policy.steps, totalSteps: total, elapsedMs });
-  el.classList.toggle('running', state.policy.status === HALT.RUNNING);
+  el.textContent = planning
+    ? `Planning · trying IK seeds + safe routes · ${(elapsedMs / 1000).toFixed(1)}s`
+    : formatSolverTicker({ steps: state.policy.steps, totalSteps: total, elapsedMs });
+  el.classList.toggle('running', state.policy.status === HALT.RUNNING || planning);
 }
 
 function loadSimulationStep(stepIndex) {
@@ -841,9 +847,10 @@ const HALT_COPY = {
 
 function renderHaltState() {
   const element = $('#halt-state');
-  element.textContent = HALT_COPY[state.policy.status]();
-  element.className = `halt-state ${state.policy.status}`;
-  $('#run-policy').textContent = state.policy.status === HALT.RUNNING ? '■ Halt policy' : 'Run demo policy';
+  const planning = state.policy.planning;
+  element.textContent = planning ? 'Planning · testing safe routes' : HALT_COPY[state.policy.status]();
+  element.className = `halt-state ${planning ? 'planning' : state.policy.status}`;
+  $('#run-policy').textContent = planning ? '■ Cancel solver' : state.policy.status === HALT.RUNNING ? '■ Halt policy' : 'Run demo policy';
   updatePolicyProgressBar();
 }
 
@@ -917,7 +924,9 @@ function settlePolicy(status) {
   }
 }
 
-function startPolicy() {
+function runPolicyPlanning() {
+  if (!state.policy.planning) return;
+  state.policy.planning = false;
   clearTimeout(state.policy.restart);
   state.policy.restart = null;
   if (!replanArms()) { state.policy.status = HALT.SAFETY; renderHaltState(); return; }
@@ -961,11 +970,29 @@ function startPolicy() {
   state.policy.frame = requestAnimationFrame(policyFrame);
 }
 
+function startPolicy() {
+  if (state.policy.status === HALT.RUNNING || state.policy.planning) return;
+  clearTimeout(state.policy.restart);
+  state.policy.restart = null;
+  state.policy.planning = true;
+  state.policy.solveStartedAt = performance.now();
+  const token = ++state.policy.planningToken;
+  renderHaltState();
+  // Yield once so the operator sees feedback before the synchronous IK/RRT
+  // work begins. The same token makes a pending solve safely cancellable.
+  requestAnimationFrame(() => setTimeout(() => {
+    if (!state.policy.planning || token !== state.policy.planningToken) return;
+    runPolicyPlanning();
+  }, 0));
+}
+
 function haltPolicy(status = HALT.OPERATOR, { silent = false } = {}) {
   if (state.policy.frame !== null) cancelAnimationFrame(state.policy.frame);
   clearTimeout(state.policy.restart);
   state.policy.frame = null;
   state.policy.restart = null;
+  state.policy.planning = false;
+  state.policy.planningToken += 1;
   if (silent) { state.policy.status = HALT.IDLE; state.policy.steps = 0; }
   else state.policy.status = status;
   renderHaltState();
@@ -1105,7 +1132,7 @@ function installListeners() {
     renderModels();
   });
   $('#run-policy').addEventListener('click', () => {
-    if (state.policy.status === HALT.RUNNING) haltPolicy(HALT.OPERATOR);
+    if (state.policy.status === HALT.RUNNING || state.policy.planning) haltPolicy(HALT.OPERATOR);
     else startPolicy();
   });
   $('#policy-speed').addEventListener('input', (event) => {

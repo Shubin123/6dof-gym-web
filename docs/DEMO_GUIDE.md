@@ -16,6 +16,8 @@ Use **Step budget** to set the run limit from 1 to 400 steps. Each task initiall
 
 Before free-space motion begins, the planner uses two stages: it first finds a safe route, then a reducer retests longer shortcuts at the normal per-joint step cap. A shortcut is kept only if every resampled frame clears the floor, table boundary, and other arm. Towel fold keeps its full pin, lift, cross, placement, and cloth-settling frames because reducing the dynamic phases would stretch the cloth unrealistically.
 
+When a policy starts, the status line immediately changes to **Planning · testing safe routes** and the progress bar animates as the solver tries inverse-kinematics seeds and collision-checked routes. This is intentionally indeterminate: no path length is known until a candidate has passed safety checks. Select **Cancel solver** to stop before any arm motion. Once planning succeeds, the bar becomes the exact control-step progress indicator.
+
 **Retry until goal** retries only after a step-budget halt, returning to the home pose for a fresh safe plan. It stops after a reached goal and never retries a safety halt. Scenario 07 turns it on by default.
 
 ## Safety policy
