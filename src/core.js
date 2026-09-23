@@ -182,6 +182,31 @@ export function evaluateCellSafety(poses, safety = {}) {
  * fixed set of seed postures keeps the result reproducible after an operator
  * has moved the sliders, and a mirrored arm is solved in its reflected frame.
  */
+/**
+ * One cyclic-coordinate-descent sweep: rotate every joint, tip to base, to
+ * point the tool as directly as each joint's own axis allows toward `goal`.
+ * solveInverseKinematics loops this to convergence across many seeds; a
+ * single sweep is also cheap enough to run once per pointer-move frame, for
+ * an interactive live-drag follow (see liveDragStep) where a full multi-seed
+ * search would stall the drag.
+ */
+function ccdSweep(q, goal, arm) {
+  const next = [...q];
+  for (let joint = next.length - 1; joint >= 0; joint -= 1) {
+    const { points, axes } = forwardKinematics(next, arm);
+    const pivot = points[joint];
+    const axis = axes[joint];
+    const toTip = sub(points.at(-1), pivot);
+    const toGoal = sub(goal, pivot);
+    const flatTip = sub(toTip, [axis[0] * dot(axis, toTip), axis[1] * dot(axis, toTip), axis[2] * dot(axis, toTip)]);
+    const flatGoal = sub(toGoal, [axis[0] * dot(axis, toGoal), axis[1] * dot(axis, toGoal), axis[2] * dot(axis, toGoal)]);
+    if (norm(flatTip) < 1e-6 || norm(flatGoal) < 1e-6) continue;
+    const turn = Math.atan2(dot(cross(flatTip, flatGoal), axis), dot(flatTip, flatGoal));
+    next[joint] = clamp(next[joint] + clamp(turn, -0.25, 0.25), -limitOf(arm, joint), limitOf(arm, joint));
+  }
+  return next;
+}
+
 export function solveInverseKinematics(target, arm = ARM, safety = {}, otherPoses = []) {
   const solverArm = arm.mirror ? { ...arm, mirror: false } : arm;
   const goal = mirrorPoint(target, arm);
@@ -216,18 +241,7 @@ export function solveInverseKinematics(target, arm = ARM, safety = {}, otherPose
   for (const seed of seeds) {
     const q = seed.map((value, index) => clamp(value, -limitOf(solverArm, index), limitOf(solverArm, index)));
     for (let iteration = 0; iteration < 120; iteration += 1) {
-      for (let joint = q.length - 1; joint >= 0; joint -= 1) {
-        const { points, axes } = forwardKinematics(q, solverArm);
-        const pivot = points[joint];
-        const axis = axes[joint];
-        const toTip = sub(points.at(-1), pivot);
-        const toGoal = sub(goal, pivot);
-        const flatTip = sub(toTip, [axis[0] * dot(axis, toTip), axis[1] * dot(axis, toTip), axis[2] * dot(axis, toTip)]);
-        const flatGoal = sub(toGoal, [axis[0] * dot(axis, toGoal), axis[1] * dot(axis, toGoal), axis[2] * dot(axis, toGoal)]);
-        if (norm(flatTip) < 1e-6 || norm(flatGoal) < 1e-6) continue;
-        const turn = Math.atan2(dot(cross(flatTip, flatGoal), axis), dot(flatTip, flatGoal));
-        q[joint] = clamp(q[joint] + clamp(turn, -0.25, 0.25), -limitOf(solverArm, joint), limitOf(solverArm, joint));
-      }
+      q.splice(0, q.length, ...ccdSweep(q, goal, solverArm));
       if (distance(forwardKinematics(q, solverArm).points.at(-1), goal) < 0.5) break;
     }
     const candidate = { q, distance: distance(forwardKinematics(q, solverArm).points.at(-1), goal) };
@@ -240,6 +254,31 @@ export function solveInverseKinematics(target, arm = ARM, safety = {}, otherPose
   // the safety result to describe the real arm rather than the solver frame.
   selected.safety = evaluateCellSafety([...otherPoses, { q: selected.q, arm }], safety);
   return selected;
+}
+
+/**
+ * One interactive drag step toward `targetPoint`: a single CCD sweep (see
+ * ccdSweep — cheap enough for every pointer-move frame, unlike the
+ * multi-seed solveInverseKinematics search above), rate-capped exactly like
+ * guidedStep, and rejected outright — the arm holds its prior pose — if the
+ * resulting frame would violate floor/workspace/inter-arm safety. This is
+ * what lets an operator drag the tool itself around the scene, rather than
+ * only a goal marker the arm chases afterward, while recording transitions.
+ */
+export function liveDragStep(q, targetPoint, arm = ARM, safety = {}, otherPoses = []) {
+  const solverArm = arm.mirror ? { ...arm, mirror: false } : arm;
+  const goal = mirrorPoint(targetPoint, arm);
+  const swept = ccdSweep(q, goal, solverArm);
+  const next = swept.map((value, index) => clamp(
+    q[index] + clamp(value - q[index], -arm.maxActionDelta, arm.maxActionDelta),
+    -limitOf(arm, index),
+    limitOf(arm, index),
+  ));
+  const safetyResult = evaluateCellSafety([...otherPoses, { q: next, arm }], safety);
+  if (!safetyResult.safe) {
+    return { q: [...q], moved: false, safety: evaluateCellSafety([...otherPoses, { q, arm }], safety) };
+  }
+  return { q: next, moved: true, safety: safetyResult };
 }
 
 /** One safety-capped tracking update toward an already validated IK plan. */

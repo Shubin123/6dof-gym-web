@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import compiled from '../data/compiled.json' with { type: 'json' };
 import registry from '../data/sources.json' with { type: 'json' };
-import { ARM, ARM_B, buildEpisodeArtifact, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, guidedStep, HALT, haltState, HOME_POSE, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
+import { ARM, ARM_B, buildEpisodeArtifact, distance, evaluateCellSafety, forwardKinematics, GOAL_Z, guidedStep, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, solveInverseKinematics } from '../src/core.js';
 
 const HOME = HOME_POSE;
 const armsOf = (workflow) => (workflow.arms === 2 ? [[ARM, workflow.goal], [ARM_B, workflow.goal_b]] : [[ARM, workflow.goal]]);
@@ -241,4 +241,47 @@ test('planTowelFoldMotion produces a valid collision-free bimanual folding traje
   assert.ok(distance(tipA, [250, 180, 15]) < 2, 'Arm A pinned at left edge');
   assert.ok(tipB[0] < 325, 'Arm B folded across towel midline');
   assert.ok(distance(tipA, tipB) < 70, 'Folded edge is close to pinned edge');
+});
+
+test('liveDragStep advances one rate-capped, safety-checked step toward the pointer', () => {
+  const safety = compiled.environment.safety;
+  const target = [...compiled.workflows[0].goal, compiled.workflows[0].goal_height];
+  const step = liveDragStep(HOME, target, ARM, safety);
+  assert.equal(step.moved, true, 'a reachable target should move the arm');
+  assert.equal(step.safety.safe, true);
+  HOME.forEach((value, joint) => {
+    assert.ok(Math.abs(step.q[joint] - value) <= ARM.maxActionDelta + 1e-9, `joint ${joint} exceeded the per-frame delta cap`);
+  });
+});
+
+test('liveDragStep converges toward a dragged target over consecutive frames', () => {
+  const safety = compiled.environment.safety;
+  const target = [...compiled.workflows[0].goal, compiled.workflows[0].goal_height];
+  let q = [...HOME];
+  for (let frame = 0; frame < 400; frame += 1) {
+    const step = liveDragStep(q, target, ARM, safety);
+    assert.equal(evaluateCellSafety([{ q: step.q, arm: ARM }], safety).safe, true, `frame ${frame} left a safe envelope`);
+    q = step.q;
+  }
+  const tip = forwardKinematics(q, ARM).points.at(-1);
+  assert.ok(distance(tip, target) < 5, `drag settled ${distance(tip, target).toFixed(2)}px from the target`);
+});
+
+test('liveDragStep refuses a step that would collide with the other arm, holding the prior pose', () => {
+  const safety = compiled.environment.safety;
+  const otherPoses = [{ q: [...HOME], arm: ARM_B }];
+  const intoOtherArm = [...ARM_B.base, 15];
+  let q = [...HOME];
+  let sawRejection = false;
+  for (let frame = 0; frame < 300; frame += 1) {
+    const step = liveDragStep(q, intoOtherArm, ARM, safety, otherPoses);
+    assert.equal(
+      evaluateCellSafety([...otherPoses, { q: step.q, arm: ARM }], safety).safe,
+      true,
+      `frame ${frame} produced an unsafe bimanual pose`,
+    );
+    if (!step.moved) sawRejection = true;
+    q = step.q;
+  }
+  assert.equal(sawRejection, true, 'dragging straight at the other arm should eventually be refused');
 });
