@@ -90,11 +90,24 @@ The demo planner is a transparent geometric controller, and a run is bounded rat
 
 ### Scenario 07: Towel fold specialist
 
-Scenario 07 now identifies its task-specific browser controller and renders a spring-cloth approximation in the 3-D viewport. The towel responds to gravity, table contact, structural springs, and only attaches to a corner once the corresponding gripper reaches it; it is not morphed merely because a progress counter advances. The visible 120-frame rolling buffer reports its captured corners and whether the mesh has settled. It remains an intentionally limited browser approximation: it does not model self-collision, friction, material anisotropy, or real gripper contact. Training a learned policy would require recorded demonstrations, camera observations, a training runtime, and evaluation data that this static repository does not include.
+Scenario 07 now identifies its task-specific browser controller and renders a spring-cloth approximation in the 3-D viewport. The towel responds to gravity, table contact, structural springs, and only attaches to a corner once the corresponding gripper reaches it; it is not morphed merely because a progress counter advances. The visible 120-frame rolling buffer reports its captured corners and whether the mesh has settled. It remains an intentionally limited browser approximation: it does not model self-collision, friction, material anisotropy, or real gripper contact. Training a learned policy still needs camera observations, a training runtime, and evaluation data this static repository does not include - see [Model and data direction](#model-and-data-direction) below for what it does now export.
 
 ## Model and data direction
 
 Use recordings from the actual workcell to fine-tune a policy. The curated source registry documents the implementation references:
+
+### Exporting a demonstration dataset
+
+The **Episode** tab records one run (manual or the demo policy) as before, and now also builds a multi-episode dataset: **Add to dataset** after each recording, then **Download dataset** for one JSON bundle with LeRobotDataset's `info`/`tasks`/`episodes`/frame-table shape - `observation.state`, `action`, `next.done`, `next.success`, `episode_index`, `frame_index`, `timestamp`, `task_index` per frame, deduplicated task text, and feature shapes read from the actual recorded dimensions (22/7 single-arm, 44/14 bimanual). Every episode in one dataset must share an arm count, since LeRobotDataset expects one fixed feature shape per dataset.
+
+`scripts/lerobot_export.py` converts that JSON bundle into an on-disk LeRobotDataset directory - `meta/info.json`, `meta/tasks.jsonl`, `meta/episodes.jsonl`, and one parquet file per episode under `data/chunk-000/` - outside the browser, since a static page can't write parquet itself:
+
+```bash
+pip install pandas pyarrow
+python scripts/lerobot_export.py armlab-dataset-1234567890.json ./out/my_dataset
+```
+
+This is still simulation-only state/action data, not camera observations from a real workcell - a real fine-tune needs both. It is a real, checkable on-ramp to the LeRobot training tools below, not a claim that this repository trains anything itself.
 
 - [SmolVLA documentation](https://huggingface.co/docs/lerobot/smolvla) — a practical open VLA starting point for an SO-101-style setup.
 - [LeRobot SO-101 guide](https://huggingface.co/docs/lerobot/il_robots) — leader/follower teleoperation.

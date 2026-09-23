@@ -120,6 +120,12 @@
                 <label class="transcript-label" for="transcript">Transcript <textarea id="transcript" rows="3" placeholder="Browser transcription appears here. You can correct it before export."></textarea></label>
               </div>
               <div class="episode-actions"><button id="replay" class="button compact ghost" disabled>↻ Replay episode</button><button id="import" class="button compact ghost">Import episode</button><button id="download" class="button compact ghost" disabled>Download recording</button><input id="import-file" type="file" accept="application/json" hidden /></div>
+              <div class="dataset-export">
+                <p class="episode-number"><strong id="dataset-count">0</strong> episode<span id="dataset-count-suffix">s</span> in this dataset</p>
+                <p class="help">Add each recording you want in the training set, then download them together as one LeRobotDataset-shaped bundle (info/tasks/episodes/frames JSON). <code>scripts/lerobot_export.py</code> converts that bundle into an on-disk LeRobotDataset directory offline. All episodes in one dataset must use the same arm count.</p>
+                <p id="dataset-status" class="help" role="status" hidden></p>
+                <div class="episode-actions"><button id="dataset-add" class="button compact ghost" disabled>+ Add to dataset</button><button id="dataset-download" class="button compact ghost" disabled>Download dataset</button><button id="dataset-clear" class="button compact ghost" disabled>Clear dataset</button></div>
+              </div>
             </div>
           </aside>
         </div>

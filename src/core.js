@@ -636,6 +636,95 @@ export function buildEpisodeArtifact({ environment, task, transitions, voice, ar
   };
 }
 
+/**
+ * Bundle several recorded episodes (each already an armlab-episode-preview
+ * artifact from buildEpisodeArtifact) into one LeRobotDataset-shaped
+ * manifest: the info/tasks/episodes/frame-table structure LeRobot's
+ * `datasets` loader expects, short of the parquet/video encoding a static
+ * browser page cannot produce. scripts/lerobot_export.py turns this JSON
+ * into an actual on-disk LeRobotDataset directory.
+ *
+ * Every episode must share one arm count: LeRobotDataset expects a single
+ * fixed observation/action shape per dataset, and this project's single-arm
+ * (22/7) and bimanual (44/14) episodes are not the same shape.
+ */
+export function buildDatasetManifest({ episodes = [], fps = 25 } = {}) {
+  if (!episodes.length) return { error: 'empty', message: 'Add at least one recorded episode before downloading a dataset.' };
+  const arms = episodes[0].arms;
+  const mismatched = episodes.find((episode) => episode.arms !== arms);
+  if (mismatched) {
+    return {
+      error: 'mixed-arms',
+      message: `Every episode in one dataset must use the same arm count (found ${arms} and ${mismatched.arms}). Download or clear this dataset before recording a different task type.`,
+    };
+  }
+
+  const firstTransition = episodes.flatMap((episode) => episode.transitions).find(Boolean);
+  const stateDim = firstTransition?.observation.length ?? 0;
+  const actionDim = firstTransition?.action_after_safety_clamp.length ?? 0;
+
+  const taskIndexOf = new Map();
+  const tasks = [];
+  const frames = [];
+  const episodeRecords = [];
+  let globalIndex = 0;
+
+  episodes.forEach((episode, episodeIndex) => {
+    const taskText = episode.task?.instruction || episode.task?.id || 'unspecified task';
+    if (!taskIndexOf.has(taskText)) taskIndexOf.set(taskText, tasks.push({ task_index: tasks.length, task: taskText }) - 1);
+    const taskIndex = taskIndexOf.get(taskText);
+
+    episode.transitions.forEach((transition, frameIndex) => {
+      const isLastFrame = frameIndex === episode.transitions.length - 1;
+      frames.push({
+        episode_index: episodeIndex,
+        frame_index: frameIndex,
+        index: globalIndex,
+        timestamp: transition.timestamp_ms / 1000,
+        'observation.state': transition.observation,
+        action: transition.action_after_safety_clamp,
+        'next.done': isLastFrame,
+        'next.success': isLastFrame && episode.halt === HALT.REACHED,
+        task_index: taskIndex,
+      });
+      globalIndex += 1;
+    });
+
+    episodeRecords.push({
+      episode_index: episodeIndex,
+      task_index: taskIndex,
+      length: episode.transitions.length,
+      halt: episode.halt,
+    });
+  });
+
+  return {
+    info: {
+      codebase_version: 'armlab-dataset-preview/v1',
+      robot_type: arms === 2 ? 'armlab-6dof-bimanual' : 'armlab-6dof',
+      fps,
+      total_episodes: episodes.length,
+      total_frames: frames.length,
+      total_tasks: tasks.length,
+      features: {
+        'observation.state': { dtype: 'float32', shape: [stateDim] },
+        action: { dtype: 'float32', shape: [actionDim] },
+        'next.done': { dtype: 'bool', shape: [1] },
+        'next.success': { dtype: 'bool', shape: [1] },
+        timestamp: { dtype: 'float32', shape: [1] },
+        episode_index: { dtype: 'int64', shape: [1] },
+        frame_index: { dtype: 'int64', shape: [1] },
+        index: { dtype: 'int64', shape: [1] },
+        task_index: { dtype: 'int64', shape: [1] },
+      },
+      source: 'browser-simulation',
+    },
+    tasks,
+    episodes: episodeRecords,
+    frames,
+  };
+}
+
 /** Calculate 0-100 progress percentage for demo policy execution. */
 export function computePolicyProgress(steps, totalSteps) {
   if (!totalSteps || totalSteps <= 0) return 0;

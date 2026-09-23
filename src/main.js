@@ -1,7 +1,7 @@
 import './styles.css';
 import compiled from '../data/compiled.json';
 import registry from '../data/sources.json';
-import { ARM, ARM_B, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, reduceSafeCellMotion, solveInverseKinematics } from './core.js';
+import { ARM, ARM_B, buildDatasetManifest, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, reduceSafeCellMotion, solveInverseKinematics } from './core.js';
 import { ClothSimulator } from './cloth.js';
 import { bootstrapPolicy, policyRecipeFor, scoreTaskStages } from './task-policies.js';
 
@@ -31,6 +31,7 @@ const state = {
   activeArm: 0,
   recording: false,
   transitions: [],
+  dataset: [],
   step: 0,
   startedAt: performance.now(),
   currentWorkflow: compiled.workflows[0],
@@ -276,6 +277,7 @@ function importEpisode(file) {
       setVoiceAudio(artifact.voice?.audio_data_url || null, artifact.voice?.mime_type);
       $('#recording-count').textContent = state.transitions.length;
       $('#download').disabled = false;
+      $('#dataset-add').disabled = false;
       $('#replay').disabled = !state.transitions.length;
       setVoiceStatus(state.voice.dataUrl ? 'Episode imported · audio ready to replay' : 'Episode imported · no audio attached');
       updateTimelineSlider();
@@ -642,6 +644,7 @@ function addTransition() {
   });
   $('#recording-count').textContent = state.transitions.length;
   $('#download').disabled = false;
+  $('#dataset-add').disabled = false;
   $('#replay').disabled = false;
   if (state.transitions.length === MAX_EPISODE_TRANSITIONS) stopRecording();
 }
@@ -649,6 +652,41 @@ function addTransition() {
 function stopRecording() {
   state.recording = false;
   $('#record').textContent = '● Record';
+}
+
+/* ---------- dataset export ---------- */
+
+function currentEpisodeArtifact() {
+  return buildEpisodeArtifact({
+    environment: compiled.environment.id,
+    task: state.currentWorkflow,
+    transitions: state.transitions,
+    voice: state.voice,
+    arms: state.armCount,
+    halt: state.policy.status,
+  });
+}
+
+function downloadJson(filename, data) {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+  const link = document.createElement('a');
+  link.href = url; link.download = filename; link.click();
+  URL.revokeObjectURL(url);
+}
+
+function setDatasetStatus(message, isError) {
+  const status = $('#dataset-status');
+  status.textContent = message;
+  status.classList.toggle('ok', !isError);
+  setHidden(status, false);
+}
+
+function updateDatasetUI() {
+  const count = state.dataset.length;
+  $('#dataset-count').textContent = count;
+  $('#dataset-count-suffix').textContent = count === 1 ? '' : 's';
+  $('#dataset-download').disabled = count === 0;
+  $('#dataset-clear').disabled = count === 0;
 }
 
 /* ---------- viewports ---------- */
@@ -1236,7 +1274,7 @@ function installListeners() {
   $('#record').addEventListener('click', () => {
     if (state.recording) { stopRecording(); return; }
     state.transitions = []; state.step = 0; state.recording = true;
-    $('#recording-count').textContent = '0'; $('#download').disabled = true; $('#replay').disabled = true;
+    $('#recording-count').textContent = '0'; $('#download').disabled = true; $('#dataset-add').disabled = true; $('#replay').disabled = true;
     $('#record').textContent = '■ Stop recording';
   });
   $('#voice-record').addEventListener('click', toggleVoiceCapture);
@@ -1246,18 +1284,30 @@ function installListeners() {
   $('#import').addEventListener('click', () => $('#import-file').click());
   $('#import-file').addEventListener('change', (event) => { if (event.target.files[0]) importEpisode(event.target.files[0]); event.target.value = ''; });
   $('#download').addEventListener('click', () => {
-    const artifact = buildEpisodeArtifact({
-      environment: compiled.environment.id,
-      task: state.currentWorkflow,
-      transitions: state.transitions,
-      voice: state.voice,
-      arms: state.armCount,
-      halt: state.policy.status,
-    });
-    const url = URL.createObjectURL(new Blob([JSON.stringify(artifact, null, 2)], { type: 'application/json' }));
-    const link = document.createElement('a');
-    link.href = url; link.download = `armlab-${state.currentWorkflow.id}-${Date.now()}.json`; link.click();
-    URL.revokeObjectURL(url);
+    downloadJson(`armlab-${state.currentWorkflow.id}-${Date.now()}.json`, currentEpisodeArtifact());
+  });
+  $('#dataset-add').addEventListener('click', () => {
+    if (!state.transitions.length) return;
+    const episode = currentEpisodeArtifact();
+    const mismatched = state.dataset.find((existing) => existing.arms !== episode.arms);
+    if (mismatched) {
+      setDatasetStatus(`This dataset already has a ${mismatched.arms}-arm episode; a ${episode.arms}-arm one can't join it. Download or clear the dataset first.`, true);
+      return;
+    }
+    state.dataset.push(episode);
+    setDatasetStatus(`Added a ${episode.transitions.length}-step episode.`, false);
+    updateDatasetUI();
+  });
+  $('#dataset-download').addEventListener('click', () => {
+    const manifest = buildDatasetManifest({ episodes: state.dataset, fps: compiled.environment.control_hz });
+    if (manifest.error) { setDatasetStatus(manifest.message, true); return; }
+    downloadJson(`armlab-dataset-${Date.now()}.json`, manifest);
+    setDatasetStatus(`Downloaded ${manifest.info.total_episodes} episodes, ${manifest.info.total_frames} frames.`, false);
+  });
+  $('#dataset-clear').addEventListener('click', () => {
+    state.dataset = [];
+    setDatasetStatus('Dataset cleared.', false);
+    updateDatasetUI();
   });
   document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => { document.querySelectorAll('.tab,.tab-content').forEach((el) => el.classList.remove('active')); tab.classList.add('active'); $(`#${tab.dataset.tab}`).classList.add('active'); }));
 }
@@ -1300,7 +1350,7 @@ function makeSliders() {
   });
 }
 
-renderScenarioSelect(); renderFamilyFilters(); renderModels(); renderDatasets(); renderStudyPath(); makeSliders(); installListeners();
+renderScenarioSelect(); renderFamilyFilters(); renderModels(); renderDatasets(); renderStudyPath(); makeSliders(); installListeners(); updateDatasetUI();
 loadWorkflow(compiled.workflows[0].id);
 renderHaltState();
 setInterval(() => { $('#sim-time').textContent = `T + ${fmt((performance.now() - state.startedAt) / 1000, 1).padStart(4, '0')} s`; }, 100);
