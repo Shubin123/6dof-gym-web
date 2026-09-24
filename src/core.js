@@ -555,7 +555,10 @@ export function reduceSafeCellMotion(poses, frames, safety = {}, { requiredFrame
   return { frames: reduced, sourceFrames: frames.length, reducedBy: frames.length - reduced.length };
 }
 
-let cachedFoldPath = null;
+// Keyed by corner pair + timing profile: a Task 8 run with different
+// corners (or heights) must not reuse a path planned for Task 7's, and vice
+// versa - the frames encode where the towel actually is.
+const cachedFoldPaths = new Map();
 
 /**
  * Specialized bimanual motion planner for the laundry folding demo (Task 07).
@@ -577,11 +580,12 @@ export function planTowelFoldMotion(poses, safety = {}, profile = {}) {
   const armA = poses[0].arm || ARM;
   const armB = poses[1].arm || ARM_B;
 
-  // Towel corners in scene pixels (the cloth sim's front corners), the fold
-  // line between them, and the heights the grippers work at.
-  const cornerA = [250, 180];
-  const cornerB = [400, 180];
-  const foldX = (cornerA[0] + cornerB[0]) / 2;
+  // Towel corners in scene pixels - the cloth sim's front corners by
+  // default, or any other pair a caller passes in profile.cornerA/cornerB
+  // (see clothCorners() in cloth.js for the four valid grid corners) to fold
+  // along a different edge. The heights the grippers work at follow below.
+  const cornerA = profile.cornerA ?? [250, 180];
+  const cornerB = profile.cornerB ?? [400, 180];
   const hoverZ = profile.hoverZ ?? 40;
   const graspZ = profile.graspZ ?? 4;
   const arcHeight = profile.arcHeight ?? 48;
@@ -603,6 +607,8 @@ export function planTowelFoldMotion(poses, safety = {}, profile = {}) {
 
   const isHomeA = jointDistance(poses[0].q, HOME_POSE) < 1e-3;
   const isHomeB = jointDistance(poses[1].q, HOME_POSE) < 1e-3;
+  const cacheKey = JSON.stringify([cornerA, cornerB, hoverZ, graspZ, arcHeight, placeHeight, settleFrames]);
+  const cachedFoldPath = cachedFoldPaths.get(cacheKey);
   if (isHomeA && isHomeB && cachedFoldPath) {
     return { ...cachedFoldPath, frames: cachedFoldPath.frames.map((f) => [[...f[0]], [...f[1]]]), grips: cachedFoldPath.grips.map((g) => [...g]), planA, planB };
   }
@@ -640,8 +646,18 @@ export function planTowelFoldMotion(poses, safety = {}, profile = {}) {
 
   // 3. Lift B's corner along an arc over the fold line while A pins its own.
   //    Every carried segment is a straight tool line (planCartesianMotion).
-  const radius = (cornerB[0] - cornerA[0]) / 2;
-  const arcPoint = (angle) => [foldX + radius * Math.cos(angle), cornerB[1], graspZ + arcHeight * Math.sin(angle)];
+  //    The arc travels along the line from B's corner to A's - horizontal for
+  //    Task 7's left/right pair, but any direction for a differently chosen
+  //    corner pair - climbing to arcHeight at its midpoint (angle = PI/2).
+  const foldMid = [(cornerA[0] + cornerB[0]) / 2, (cornerA[1] + cornerB[1]) / 2];
+  const foldVector = [cornerA[0] - cornerB[0], cornerA[1] - cornerB[1]];
+  const radius = Math.hypot(foldVector[0], foldVector[1]) / 2;
+  const foldUnit = radius > 1e-6 ? [foldVector[0] / (2 * radius), foldVector[1] / (2 * radius)] : [1, 0];
+  const arcPoint = (angle) => [
+    foldMid[0] - foldUnit[0] * radius * Math.cos(angle),
+    foldMid[1] - foldUnit[1] * radius * Math.cos(angle),
+    graspZ + arcHeight * Math.sin(angle),
+  ];
   const liftArc = [1, 2, 3, 4].map((i) => arcPoint((i / 4) * (Math.PI / 2)));
   const lift = planCartesianMotion(curB, liftArc, armB, safety, [{ q: curA, arm: armA }]);
   if (!lift) return null;
@@ -676,7 +692,7 @@ export function planTowelFoldMotion(poses, safety = {}, profile = {}) {
   // move too abruptly and stretches the simulated fabric. Generic policies
   // still receive the second-stage reducer in startPolicy().
   const result = { frames, grips, sourceFrames: frames.length, reducedBy: 0, stageEnds, planA, planB };
-  if (isHomeA && isHomeB) cachedFoldPath = { ...result, frames: frames.map((f) => [[...f[0]], [...f[1]]]), grips: grips.map((g) => [...g]) };
+  if (isHomeA && isHomeB) cachedFoldPaths.set(cacheKey, { ...result, frames: frames.map((f) => [[...f[0]], [...f[1]]]), grips: grips.map((g) => [...g]) });
   return result;
 }
 

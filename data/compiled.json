@@ -464,6 +464,43 @@
       "baseline": "ACT + scripted supervisor",
       "arms": 1,
       "goal_height": 10
+    },
+    {
+      "id": "fold_custom",
+      "number": "12",
+      "name": "Configurable fold",
+      "family": "laundry",
+      "difficulty": 4,
+      "horizon_steps": 200,
+      "instruction": "Choose which corner each gripper grasps, preview the fold line, then fold.",
+      "goal": [
+        250,
+        180
+      ],
+      "goal_b": [
+        400,
+        180
+      ],
+      "object": "towel",
+      "metric": "fold alignment tolerance",
+      "summary": "Task 07's fold with the grasp point exposed as a setting instead of fixed: each arm grasps either its true front corner or one vertex in from it, and a preview line shows the resulting fold direction before the policy runs. The safe range is narrow - the arm reach that makes Task 07's pair comfortable does not extend to the towel's back corners or to swapped roles, both of which fail the same safety check a live run would.",
+      "success": "Folded edge within 3 cm of the pinned edge, no snagging, and the towel still flat under the holding gripper, for whichever grasp vertices were selected.",
+      "sensors": "Overhead RGB + a wrist camera per arm. Depth helps enormously in finding a liftable edge.",
+      "curriculum": [
+        "True-corner grasp on both sides (Task 07's exact case)",
+        "One vertex inset on the carried side only",
+        "One vertex inset on the pinned side only",
+        "Inset on both sides",
+        "Preview the fold line before committing to a run"
+      ],
+      "failure_modes": [
+        "A requested grasp vertex the arm cannot safely reach is rejected before any motion, not discovered mid-fold",
+        "Gripper closes on two layers and the fold tears the stack apart"
+      ],
+      "guardrail": "Keep the arm outside any appliance. Never automate a door, drum, or heat source without dedicated safety hardware.",
+      "baseline": "Diffusion Policy",
+      "arms": 2,
+      "goal_height": 15
     }
   ],
   "models": [

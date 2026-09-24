@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ClothSimulator, buildClothTopology } from '../src/cloth.js';
+import { ClothSimulator, buildClothTopology, clothCorners } from '../src/cloth.js';
 
 test('ClothSimulator initializes with correct grid topology and constraints', () => {
   const sim = new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2 });
@@ -182,6 +182,74 @@ test('Folding motion folds cloth over midline with layer thickness separation', 
 
         if (sim.invMass[i2] > 0 && Math.hypot(x2 - x1, y2 - y1) < 0.1) {
           assert.ok(z2 >= z1 + sim.thickness - 1e-4, 'Layer thickness separation preserved');
+        }
+      }
+    }
+  }
+});
+
+test('setAnchors repoints the graspable mask and re-infers the fold axis', () => {
+  const columns = 12;
+  const rows = 10;
+  const corners = clothCorners(columns, rows);
+  const sim = new ClothSimulator({ columns, rows });
+  assert.equal(sim.foldAxis, 'columns');
+  assert.equal(sim.graspable[corners.frontLeft], 1);
+  assert.equal(sim.graspable[corners.backLeft], 0);
+
+  sim.setAnchors(corners.frontLeft, corners.backLeft);
+  assert.equal(sim.foldAxis, 'rows', 're-inferred after moving to a vertically-paired anchor');
+  assert.equal(sim.graspable[corners.frontLeft], 1, 'still graspable: reused by the new pair');
+  assert.equal(sim.graspable[corners.frontRight], 0, 'no longer graspable: not part of the new pair');
+  assert.equal(sim.graspable[corners.backLeft], 1);
+  assert.deepEqual([...sim.anchorsA], [corners.frontLeft]);
+  assert.deepEqual([...sim.anchorsB], [corners.backLeft]);
+});
+
+test('A configurable fold along the front-back (row) axis folds and separates layers too', () => {
+  const columns = 12;
+  const rows = 10;
+  const corners = clothCorners(columns, rows);
+  const sim = new ClothSimulator({ columns, rows, thickness: 0.035, anchorA: corners.frontLeft, anchorB: corners.backLeft });
+  assert.equal(sim.foldAxis, 'rows', 'front-left/back-left differ in row, not column');
+
+  const targetA = { x: -0.75, y: -0.6, z: 0.02 };
+  const targetB = { x: -0.75, y: 0.6, z: 0.02 };
+  sim.step({ targetA, targetB });
+
+  // Mirror of the column-axis test above, travelling across the midline in y instead of x.
+  const steps = 60;
+  for (let s = 0; s <= steps; s += 1) {
+    const t = s / steps;
+    const y = 0.6 - t * 0.9; // from +0.6 across the midline to -0.3
+    const z = 0.02 + Math.sin(t * Math.PI) * 0.35 + (1 - t) * 0.02;
+    sim.step({ targetA, targetB: { x: -0.75, y, z } });
+  }
+
+  const frontDist = sim.getFrontFoldDistance();
+  assert.ok(frontDist < 0.5, `Held corners folded together: distance = ${frontDist.toFixed(3)}`);
+
+  const metrics = sim.getFoldMetrics();
+  assert.equal(metrics.folded, true, 'Fold metrics report folded state');
+  assert.ok(metrics.stretchError < 0.25, `Max stretch error bounded: ${metrics.stretchError.toFixed(3)}`);
+
+  // The same thickness barrier, checked across rows instead of columns.
+  const halfRow = sim.rows / 2;
+  for (let c = 0; c <= sim.columns; c += 1) {
+    for (let r1 = 0; r1 <= halfRow; r1 += 1) {
+      const i1 = r1 * (sim.columns + 1) + c;
+      const x1 = sim.positions[i1 * 3];
+      const y1 = sim.positions[i1 * 3 + 1];
+      const z1 = sim.positions[i1 * 3 + 2];
+
+      for (let r2 = sim.rows; r2 > halfRow; r2 -= 1) {
+        const i2 = r2 * (sim.columns + 1) + c;
+        const x2 = sim.positions[i2 * 3];
+        const y2 = sim.positions[i2 * 3 + 1];
+        const z2 = sim.positions[i2 * 3 + 2];
+
+        if (sim.invMass[i2] > 0 && Math.hypot(x2 - x1, y2 - y1) < 0.1) {
+          assert.ok(z2 >= z1 + sim.thickness - 1e-4, 'Layer thickness separation preserved across rows');
         }
       }
     }

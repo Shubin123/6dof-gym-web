@@ -2,7 +2,7 @@ import './styles.css';
 import compiled from '../data/compiled.json';
 import registry from '../data/sources.json';
 import { ARM, ARM_B, buildDatasetManifest, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, reduceSafeCellMotion, solveInverseKinematics } from './core.js';
-import { ClothSimulator } from './cloth.js';
+import { ClothSimulator, clothCorners } from './cloth.js';
 import { loadClothSettings, onClothSettingsChange } from './cloth-settings.js';
 import { FOLD_GUIDE, FOLD_STAGES, clothPointToScene, foldGuideStage } from './fold-guide.js';
 import { bootstrapPolicy, policyRecipeFor, scoreTaskStages } from './task-policies.js';
@@ -51,10 +51,38 @@ const state = {
   // Physics values come from the cloth settings page (cloth.html).
   cloth2d: new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2, ...loadClothSettings() }),
   timeline: { currentStep: 0, totalSteps: 0, scrubbing: false },
+  // Task 12 (Configurable fold): which vertex each arm grasps. 'corner' is
+  // Task 7's exact pair; 'inset' moves one vertex in. That one-vertex step is
+  // the whole validated-safe range - planCartesianMotion's arm-clearance and
+  // workspace-boundary checks reject every other corner pair and every
+  // swapped-role pair this rig's two fixed-base arms were tried against.
+  foldVertex: { A: 'corner', B: 'corner' },
 };
 
 const activeArms = () => state.arms.slice(0, state.armCount);
 const controlledArm = () => state.arms[state.activeArm];
+const isClothFoldTask = (workflow) => workflow.id === 'fold' || workflow.id === 'fold_custom';
+
+/** Point index of the vertex `side`'s current selection grasps. */
+function foldVertexIndex(side) {
+  const { columns, rows } = state.cloth2d;
+  const corners = clothCorners(columns, rows);
+  const inset = state.foldVertex[side] === 'inset';
+  return side === 'A' ? corners.frontLeft + (inset ? 1 : 0) : corners.frontRight - (inset ? 1 : 0);
+}
+
+/** Rest-pose scene position of a fold vertex, for the pre-run preview line. */
+function foldVertexScenePoint(side) {
+  const idx = foldVertexIndex(side);
+  const p = state.cloth2d.restPositions;
+  return [325 + p[idx * 3] * 100, 240 + p[idx * 3 + 1] * 100];
+}
+
+/** Apply the current vertex selection to the shared cloth simulator. */
+function applyFoldVertexSelection() {
+  if (state.currentWorkflow.id !== 'fold_custom') return;
+  state.cloth2d.setAnchors(foldVertexIndex('A'), foldVertexIndex('B'));
+}
 
 const sliders = $('#sliders');
 const MAX_VOICE_BYTES = 5 * 1024 * 1024;
@@ -340,7 +368,7 @@ function updateArms() {
 function updateCloth2D() {
   const clothGroup = $('#cloth-2d');
   if (!clothGroup) return;
-  const isFold = state.currentWorkflow.id === 'fold';
+  const isFold = isClothFoldTask(state.currentWorkflow);
   setHidden(clothGroup, !isFold);
   // The fold plan does not chase per-arm goal cubes; the fold guide below
   // shows what each arm is doing instead.
@@ -350,14 +378,40 @@ function updateCloth2D() {
   const { basePoints, creasePoints } = state.cloth2d.get2DPolygons([325, 240], 100);
   const pathString = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0], 1)} ${fmt(p[1], 1)}`).join(' ') + ' Z';
   const creaseString = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0], 1)} ${fmt(p[1], 1)}`).join(' ');
+  const isCustom = state.currentWorkflow.id === 'fold_custom';
 
   clothGroup.innerHTML = `
+    ${isCustom ? '' : `
     <rect class="cloth-2d-target" x="250" y="180" width="75" height="120" rx="3" />
-    <text class="cloth-2d-target-label" x="287.5" y="318" text-anchor="middle">FOLDED TARGET</text>
+    <text class="cloth-2d-target-label" x="287.5" y="318" text-anchor="middle">FOLDED TARGET</text>`}
     <path class="cloth-2d-base" d="${pathString(basePoints)}" />
     <path class="cloth-2d-crease" d="${creaseString(creasePoints)}" />
-    ${foldGuideSvg()}
+    ${isCustom ? configurableFoldGuideSvg() : foldGuideSvg()}
   `;
+}
+
+/**
+ * Task 12 guide: unlike Task 7's (which reads live cloth state to show
+ * captured/pinned progress), this previews the *selected* grasp vertices and
+ * fold direction so the operator can see the outcome before running - the
+ * whole point of the task - then keeps showing it as a reference during the
+ * run alongside the live cloth mesh above.
+ */
+function configurableFoldGuideSvg() {
+  const [ax, ay] = foldVertexScenePoint('A');
+  const [bx, by] = foldVertexScenePoint('B');
+  const midX = (ax + bx) / 2;
+  const cloth = state.cloth2d;
+  const mark = (x, y, arm, held) => `
+    <g class="fold-mark ${held ? 'held' : 'pending'}" data-arm="${arm}">
+      <circle cx="${fmt(x, 1)}" cy="${fmt(y, 1)}" r="9" />
+    </g>`;
+  return `
+    <defs><marker id="fold-arrowhead" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="fold-arrowhead" /></marker></defs>
+    <path class="fold-arrow" d="M${fmt(bx, 1)} ${fmt(by, 1)} Q${fmt(midX, 1)} ${fmt(ay - 40, 1)} ${fmt(ax, 1)} ${fmt(ay, 1)}" marker-end="url(#fold-arrowhead)" />
+    ${mark(ax, ay, 'A', cloth.captured[0] || cloth.tablePinA)}
+    ${mark(bx, by, 'B', cloth.captured[1])}
+    <text class="fold-stage" x="96" y="112">Pin A: ${state.foldVertex.A} vertex · Fold B onto it: ${state.foldVertex.B} vertex</text>`;
 }
 
 /** Task 7 guide: fold line, each arm's corner, and where B's corner goes next. */
@@ -401,7 +455,7 @@ function foldGuideSvg() {
  * towels.
  */
 function advanceClothPhysics() {
-  if (state.currentWorkflow.id !== 'fold') return;
+  if (!isClothFoldTask(state.currentWorkflow)) return;
   const targets = activeArms().map((armState) => {
     const tip = tipOf(armState);
     return { x: (tip[0] - 325) / 100, y: (tip[1] - 240) / 100, z: tip[2] / 100 };
@@ -586,7 +640,7 @@ function pushViewportState() {
 
 const tipOf = (armState) => forwardKinematics(armState.q, armState.arm).points.at(-1);
 /** Whether arm `index` has a towel corner in its closed gripper. */
-const gripping = (index) => state.currentWorkflow.id === 'fold' && Boolean(state.cloth2d.captured[index]);
+const gripping = (index) => isClothFoldTask(state.currentWorkflow) && Boolean(state.cloth2d.captured[index]);
 const armError = (armState) => distance(tipOf(armState), armState.goal);
 
 function updateTelemetry() {
@@ -919,16 +973,21 @@ function loadWorkflow(id, { scroll = false } = {}) {
   // solver to relax) currently runs to ~477 steps; give it enough budget to
   // finish without truncating the settle tail, matching the raised ceiling
   // in policyBudget() and the slider's max in index.html.
-  state.policy.budget = workflow.id === 'fold' ? FOLD_STEP_BUDGET : workflow.horizon_steps;
-  state.policy.loop = workflow.id === 'fold';
+  state.policy.budget = isClothFoldTask(workflow) ? FOLD_STEP_BUDGET : workflow.horizon_steps;
+  state.policy.loop = isClothFoldTask(workflow);
   $('#policy-loop').checked = state.policy.loop;
   $('#policy-budget').value = state.policy.budget;
   $('#policy-budget-value').textContent = state.policy.budget;
   $('#policy-profile').textContent = policyRecipeFor(workflow).label;
-  setHidden($('#cloth-status'), workflow.id !== 'fold');
-  setHidden($('#cloth-settings-link'), workflow.id !== 'fold');
+  setHidden($('#cloth-status'), !isClothFoldTask(workflow));
+  setHidden($('#cloth-settings-link'), !isClothFoldTask(workflow));
+  setHidden($('#fold-vertex-picker'), workflow.id !== 'fold_custom');
   $('#cloth-status').textContent = 'Cloth frames 0 / 120';
+  // Task 7 always grasps the true corners; only the configurable task varies
+  // it, and its own selection re-applies below.
+  if (workflow.id !== 'fold_custom') state.cloth2d?.setAnchors(0, state.cloth2d.columns);
   state.cloth2d?.reset();
+  applyFoldVertexSelection();
   viewport.instance?.resetCloth?.();
   state.frameHistory = [];
   state.timeline.currentStep = 0;
@@ -1021,7 +1080,7 @@ function policyStep() {
   // fold runs to the end of its own deterministic, pre-validated plan
   // instead - reached via the frame-exhaustion check above, bounded by the
   // step budget below like any other task.
-  if (state.currentWorkflow.id === 'fold') {
+  if (isClothFoldTask(state.currentWorkflow)) {
     return state.policy.steps >= policyBudget() ? HALT.BUDGET : HALT.RUNNING;
   }
   return haltState({ error, steps: state.policy.steps, budget: policyBudget() });
@@ -1085,16 +1144,19 @@ async function runPolicyPlanning(token) {
   renderHaltState();
   await yieldForSolverFeedback();
   if (!isCurrent()) return;
-  if (state.currentWorkflow.id === 'fold' && activeArms().length === 2) {
+  if (isClothFoldTask(state.currentWorkflow) && activeArms().length === 2) {
     state.policy.planningPhase = 'calibrating cloth-aware policy';
     renderHaltState();
     await yieldForSolverFeedback();
     if (!isCurrent()) return;
     const warmStart = bootstrapPolicy(state.currentWorkflow);
+    const profile = state.currentWorkflow.id === 'fold_custom'
+      ? { ...warmStart.profile, cornerA: foldVertexScenePoint('A'), cornerB: foldVertexScenePoint('B') }
+      : warmStart.profile;
     motion = planTowelFoldMotion(
       poses,
       compiled.environment.safety,
-      warmStart.profile,
+      profile,
     );
   }
   if (!motion) {
@@ -1281,6 +1343,14 @@ function installListeners() {
   $('#view-2d').addEventListener('click', () => setViewportMode('2d'));
   $('#view-3d').addEventListener('click', () => setViewportMode('3d'));
   $('#scenario').addEventListener('change', (event) => loadWorkflow(event.target.value));
+  const onFoldVertexChange = (side) => (event) => {
+    state.foldVertex[side] = event.target.value;
+    applyFoldVertexSelection();
+    haltPolicy(HALT.IDLE, { silent: true });
+    resetArms();
+  };
+  $('#fold-vertex-a').addEventListener('change', onFoldVertexChange('A'));
+  $('#fold-vertex-b').addEventListener('change', onFoldVertexChange('B'));
   $('#arm-switch').addEventListener('click', (event) => {
     const index = event.target.dataset.armIndex;
     if (index === undefined) return;

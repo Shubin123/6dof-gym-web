@@ -26,6 +26,22 @@ export const TASK_POLICY_RECIPES = Object.freeze({
       Object.freeze({ id: 'settle', label: 'settle without overstretch', weight: 0.12 }),
     ]),
   }),
+  // Same recipe as `fold`: the grasp vertices vary (see main.js's fold-vertex
+  // selection), but the stage rewards read cloth.getFoldMetrics() and the
+  // capture flags, neither of which cares which vertex was actually held.
+  fold_custom: Object.freeze({
+    label: 'Cloth-aware warm-start (configurable grasp)',
+    kind: 'cloth-fold',
+    training: 'Synthetic cloth calibration',
+    profile: Object.freeze({ liftHeight: 45, crossHeight: 38, placeHeight: 6, settleFrames: 50 }),
+    stages: Object.freeze([
+      Object.freeze({ id: 'contact', label: 'secure both corners', weight: 0.18 }),
+      Object.freeze({ id: 'pin', label: 'pin and release left edge', weight: 0.18 }),
+      Object.freeze({ id: 'cross', label: 'lift and cross fold line', weight: 0.24 }),
+      Object.freeze({ id: 'place', label: 'place on folded target', weight: 0.28 }),
+      Object.freeze({ id: 'settle', label: 'settle without overstretch', weight: 0.12 }),
+    ]),
+  }),
 });
 
 export function policyRecipeFor(task) {

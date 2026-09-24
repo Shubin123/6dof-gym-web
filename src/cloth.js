@@ -67,6 +67,20 @@ export const DEFAULT_CLOTH_CONFIG = Object.freeze({
   settleDisplacementLimit: 0.003,
 });
 
+/**
+ * The four grid-corner point indices for a given resolution - the
+ * "predefined vertices" a configurable fold task lets a caller pin the
+ * grippers to, instead of only the front-left/front-right pair Task 7 uses.
+ */
+export function clothCorners(columns, rows) {
+  return {
+    frontLeft: 0,
+    frontRight: columns,
+    backLeft: rows * (columns + 1),
+    backRight: rows * (columns + 1) + columns,
+  };
+}
+
 /** Parameters that may change on a live simulator; the rest fix the mesh. */
 export const CLOTH_PHYSICS_KEYS = Object.freeze([
   'thickness', 'gravity', 'damping', 'staticFriction', 'kineticFriction', 'substeps',
@@ -222,11 +236,15 @@ export class ClothSimulator {
     this.magnets = new Float32Array(2 * 4);
     this.magnetFrom = new Float32Array(2 * 3);
 
-    // Graspable paint: the two front corners, one per arm.
+    // Graspable paint: one corner per arm, front-left/front-right by default.
+    // A caller may pin any two of the grid's four corners instead (see
+    // clothCorners() above and setAnchors()) to fold along a different edge;
+    // the axis fold-layer separation and the alignment metrics split on is
+    // inferred from whichever pair was chosen, not hardcoded to columns.
     this.anchorsA = [0];
     this.anchorsB = [this.columns];
     this.graspable = new Uint8Array(this.numVertices);
-    for (const idx of [...this.anchorsA, ...this.anchorsB]) this.graspable[idx] = 1;
+    this.setAnchors(options.anchorA ?? 0, options.anchorB ?? this.columns);
 
     this._calculateRestLengths();
     this.configure(this.config);
@@ -306,6 +324,22 @@ export class ClothSimulator {
     this.tablePinA = null;
     this.history = [];
     this.settled = false;
+  }
+
+  /**
+   * Repoint which vertex each arm grasps - e.g. a configurable-fold task
+   * letting an operator pick a different one of the four corners (see
+   * clothCorners()), or a vertex near one, rather than the fixed
+   * front-left/front-right pair every other caller uses. Does not touch
+   * physics state; call reset() too if a grasp is already in progress.
+   */
+  setAnchors(anchorA, anchorB) {
+    for (const idx of [...this.anchorsA, ...this.anchorsB]) this.graspable[idx] = 0;
+    this.anchorsA = [anchorA];
+    this.anchorsB = [anchorB];
+    for (const idx of [anchorA, anchorB]) this.graspable[idx] = 1;
+    const rowOf = (idx) => Math.floor(idx / (this.columns + 1));
+    this.foldAxis = rowOf(anchorA) === rowOf(anchorB) ? 'columns' : 'rows';
   }
 
   /** Nearest free graspable point within graspRadius of `target`, or -1. */
@@ -551,23 +585,38 @@ export class ClothSimulator {
    */
   _solveLayerSeparation() {
     const p = this.positions;
-    const halfCol = this.columns / 2;
     const maxStep = 0.008 / Math.sqrt(this.substeps);
+    const lift = (i1, i2) => {
+      if (this.invMass[i2] === 0) return;
+      const o1 = i1 * 3;
+      const o2 = i2 * 3;
+      if (Math.hypot(p[o2] - p[o1], p[o2 + 1] - p[o1 + 1]) >= 0.12) return;
+      const minZ = p[o1 + 2] + this.thickness;
+      if (p[o2 + 2] < minZ) {
+        p[o2 + 2] += Math.min(minZ - p[o2 + 2], maxStep);
+        if (this.forces[o2 + 2] < 0) this.forces[o2 + 2] = 0;
+      }
+    };
+    // Whichever axis the pinned pair (anchorsA/anchorsB) differ along is the
+    // fold axis: a right-half point (index > half along that axis) folding
+    // over a left-half point of the same cross-section must stay one
+    // thickness above it. Pairs within the bending stencil (two steps) are
+    // neighbours in the weave, not stacked layers, and are skipped - at rest
+    // they are closer than the overlap radius and would otherwise lift the
+    // flat towel's midline.
+    if (this.foldAxis === 'rows') {
+      const halfRow = this.rows / 2;
+      for (let c = 0; c <= this.columns; c += 1) {
+        for (let r2 = this.rows; r2 > halfRow; r2 -= 1) {
+          for (let r1 = 0; r1 <= halfRow && r1 < r2 - 2; r1 += 1) lift(r1 * (this.columns + 1) + c, r2 * (this.columns + 1) + c);
+        }
+      }
+      return;
+    }
+    const halfCol = this.columns / 2;
     for (let r = 0; r <= this.rows; r += 1) {
       for (let c2 = this.columns; c2 > halfCol; c2 -= 1) {
-        const i2 = r * (this.columns + 1) + c2;
-        if (this.invMass[i2] === 0) continue;
-        const o2 = i2 * 3;
-        for (let c1 = 0; c1 <= halfCol && c1 < c2 - 2; c1 += 1) {
-          const o1 = (r * (this.columns + 1) + c1) * 3;
-          if (Math.hypot(p[o2] - p[o1], p[o2 + 1] - p[o1 + 1]) >= 0.12) continue;
-          const minZ = p[o1 + 2] + this.thickness;
-          if (p[o2 + 2] < minZ) {
-            const lift = Math.min(minZ - p[o2 + 2], maxStep);
-            p[o2 + 2] += lift;
-            if (this.forces[o2 + 2] < 0) this.forces[o2 + 2] = 0;
-          }
-        }
+        for (let c1 = 0; c1 <= halfCol && c1 < c2 - 2; c1 += 1) lift(r * (this.columns + 1) + c1, r * (this.columns + 1) + c2);
       }
     }
   }
@@ -627,27 +676,27 @@ export class ClothSimulator {
     for (let i = 0; i < this.numVertices; i += 1) this.invMass[i] = this.pointMagnet[i] ? 0 : 1;
   }
 
-  /** Distance between the pinned left edge (c=0) and the right edge (c=columns). */
+  /** Average edge-to-edge distance across the fold axis (not just the held corners). */
   getFoldAlignment() {
     let sumDist = 0;
-    for (let r = 0; r <= this.rows; r += 1) {
-      const iLeft = r * (this.columns + 1);
-      const iRight = iLeft + this.columns;
+    const pairs = this.foldAxis === 'rows' ? this.columns + 1 : this.rows + 1;
+    for (let k = 0; k <= (pairs - 1); k += 1) {
+      const [iNear, iFar] = this.foldAxis === 'rows'
+        ? [k, this.rows * (this.columns + 1) + k]
+        : [k * (this.columns + 1), k * (this.columns + 1) + this.columns];
       sumDist += Math.hypot(
-        this.positions[iRight * 3] - this.positions[iLeft * 3],
-        this.positions[iRight * 3 + 1] - this.positions[iLeft * 3 + 1],
+        this.positions[iFar * 3] - this.positions[iNear * 3],
+        this.positions[iFar * 3 + 1] - this.positions[iNear * 3 + 1],
       );
     }
-    return sumDist / (this.rows + 1);
+    return sumDist / pairs;
   }
 
-  /** Front corner alignment distance (where the gripper holds). */
+  /** Distance between the two held corners (where the grippers hold). */
   getFrontFoldDistance() {
-    const cornerRight = this.columns;
-    return Math.hypot(
-      this.positions[cornerRight * 3] - this.positions[0],
-      this.positions[cornerRight * 3 + 1] - this.positions[1],
-    );
+    const a = this.anchorsA[0] * 3;
+    const b = this.anchorsB[0] * 3;
+    return Math.hypot(this.positions[b] - this.positions[a], this.positions[b + 1] - this.positions[a + 1]);
   }
 
   /** Max relative stretch error across all structural springs. */

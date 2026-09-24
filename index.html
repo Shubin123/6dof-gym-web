@@ -101,6 +101,11 @@
             <div class="tab-content active" id="control">
               <label class="select-label">Task scenario<select id="scenario"></select></label>
               <p class="help" id="scenario-instruction">Drag the amber target in the scene, or adjust the joint targets below.</p>
+              <div id="fold-vertex-picker" class="fold-vertex-picker" hidden>
+                <label class="select-label">Arm A grasps<select id="fold-vertex-a"><option value="corner">True corner</option><option value="inset">One vertex in</option></select></label>
+                <label class="select-label">Arm B grasps<select id="fold-vertex-b"><option value="corner">True corner</option><option value="inset">One vertex in</option></select></label>
+                <p class="help">Preview the fold line above before running. Only these vertices are validated safe for this rig's arm reach - the towel's back corners and swapped grasp roles fail the safety check.</p>
+              </div>
               <div id="arm-switch" class="arm-switch" role="group" aria-label="Arm under manual control" hidden></div>
               <div id="sliders" class="sliders"></div>
               <div class="safety"><span>Safety envelope</span><b id="safety-state">Within limits</b></div>
