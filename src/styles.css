@@ -138,3 +138,4 @@
 .fold-stage{fill:#f5f6f8;font:600 11px var(--sans);letter-spacing:.2px;paint-order:stroke;stroke:#101620;stroke-width:4px}
 @keyframes fold-pulse{50%{opacity:.45}}
 @media(prefers-reduced-motion:reduce){.fold-mark.pending circle{animation:none}}
+.fold-mark,.fold-pin,.fold-line-label,.fold-stage,.grip-held{pointer-events:none;user-select:none}
