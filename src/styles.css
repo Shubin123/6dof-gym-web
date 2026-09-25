@@ -84,7 +84,8 @@
 .viewport-loader-step{font:10px var(--mono);color:#8e9aad;margin:0}
 
 /* 2D Cloth SVG styles */
-.cloth-2d-base{fill:#49c7e8;fill-opacity:.85;stroke:#69d2df;stroke-width:1.5;stroke-linejoin:round;filter:drop-shadow(2px 4px 6px rgba(0,0,0,.4))}
+.cloth-2d-base{fill:#49c7e8;fill-opacity:.85;stroke:#49c7e8;stroke-width:.6;stroke-linejoin:round;filter:drop-shadow(2px 4px 6px rgba(0,0,0,.4))}
+.cloth-2d-flipped{fill:#8fe0f2;stroke:#8fe0f2}
 .cloth-2d-crease{stroke:#e1f9ff;stroke-width:1.5;stroke-dasharray:3 3;fill:none;opacity:.8}
 
 .cloth-2d-target{fill:#c9fb5d18;stroke:#c9fb5d;stroke-width:1.5;stroke-dasharray:5 4;pointer-events:none}
