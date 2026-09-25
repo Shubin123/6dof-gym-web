@@ -93,6 +93,12 @@
       "name": "Failure recovery",
       "level": "SYSTEM SKILL",
       "blurb": "Detect, retreat, re-observe, retry within a budget, escalate. Generalization comes from a system, not a checkpoint."
+    },
+    {
+      "id": "rigid",
+      "name": "Rigid objects",
+      "level": "PHYSICAL CONTACT",
+      "blurb": "Real colliders: cubes and spheres with mass, friction, and gravity. The gripper only holds what is actually between its jaws, and whatever it lets go of falls, slides, or rolls."
     }
   ],
   "workflows": [
@@ -501,6 +507,201 @@
       "baseline": "Diffusion Policy",
       "arms": 2,
       "goal_height": 15
+    },
+    {
+      "family": "rigid",
+      "arms": 1,
+      "horizon_steps": 200,
+      "goal_height": 60,
+      "sensors": "Overhead RGB for the object pose; joint encoders plus a gripper width reading tell a real grasp from an empty close.",
+      "guardrail": "Light, blunt objects only while grasp and release are being tuned. A dropped part is data, not a failure to hide - log it.",
+      "id": "pick_cube",
+      "number": "13",
+      "name": "Cube pick & place",
+      "difficulty": 2,
+      "instruction": "Pick up the green cube and set it down inside the marked square.",
+      "goal": [
+        460,
+        320
+      ],
+      "object": "cube",
+      "metric": "cube at rest in zone",
+      "summary": "The first task with a real rigid body. The cube has mass and friction, the gripper's fingers are colliders, and nothing is attached by proximity: a top-down grasp has to straddle the cube, and a release anywhere but the table leaves it to fall.",
+      "success": "Cube center inside the 50 mm square, flat on the table, not held, and at rest.",
+      "curriculum": [
+        "Cube square to the gripper",
+        "Cube yawed so the jaws close across a diagonal",
+        "Zone moved by clicking the scene",
+        "Cube nudged after planning, so the grasp misses and the run is scored a failure"
+      ],
+      "failure_modes": [
+        "Grasp planned on a stale object pose closes on air - the jaws only hold what is between them",
+        "A release too high lets the cube bounce out of the zone"
+      ],
+      "baseline": "Scripted controller",
+      "rigid": {
+        "objects": [
+          {
+            "id": "cube",
+            "shape": "box",
+            "size": 30,
+            "position": [
+              450,
+              180
+            ],
+            "yaw": 0.35,
+            "mass": 0.06,
+            "color": "#c9fb5d"
+          }
+        ],
+        "fixtures": [],
+        "goal": {
+          "type": "zone",
+          "object": "cube",
+          "position": [
+            460,
+            320
+          ],
+          "size": [
+            50,
+            50
+          ]
+        }
+      }
+    },
+    {
+      "family": "rigid",
+      "arms": 1,
+      "horizon_steps": 200,
+      "goal_height": 60,
+      "sensors": "Overhead RGB for the object pose; joint encoders plus a gripper width reading tell a real grasp from an empty close.",
+      "guardrail": "Light, blunt objects only while grasp and release are being tuned. A dropped part is data, not a failure to hide - log it.",
+      "id": "pick_sphere",
+      "number": "14",
+      "name": "Ball into tray",
+      "difficulty": 2,
+      "instruction": "Pick up the ball and drop it into the tray.",
+      "goal": [
+        460,
+        320
+      ],
+      "object": "sphere",
+      "metric": "ball at rest in tray",
+      "summary": "A sphere has one contact point with the table and nothing stops it rolling, so it is unforgiving of a sloppy release. The tray's walls are real colliders too: a ball dropped inside stays inside, and one that clips a wall bounces off it.",
+      "success": "Ball center inside the tray's walls, below their rim, not held, and at rest.",
+      "curriculum": [
+        "Release just above the tray floor",
+        "Release from higher up - the walls have to catch it",
+        "Tray moved by clicking the scene"
+      ],
+      "failure_modes": [
+        "Ball squeezed off-center rolls out of the jaws",
+        "A release with any sideways tool velocity sends the ball rolling"
+      ],
+      "baseline": "Scripted controller",
+      "rigid": {
+        "objects": [
+          {
+            "id": "ball",
+            "shape": "sphere",
+            "size": 32,
+            "position": [
+              450,
+              180
+            ],
+            "mass": 0.05,
+            "color": "#ff8a5b"
+          }
+        ],
+        "fixtures": [
+          {
+            "id": "tray",
+            "type": "tray",
+            "position": [
+              460,
+              320
+            ],
+            "inner": [
+              64,
+              64
+            ],
+            "wall": 4,
+            "height": 18
+          }
+        ],
+        "goal": {
+          "type": "tray",
+          "object": "ball",
+          "fixture": "tray"
+        }
+      }
+    },
+    {
+      "family": "rigid",
+      "arms": 1,
+      "horizon_steps": 200,
+      "goal_height": 60,
+      "sensors": "Overhead RGB for the object pose; joint encoders plus a gripper width reading tell a real grasp from an empty close.",
+      "guardrail": "Light, blunt objects only while grasp and release are being tuned. A dropped part is data, not a failure to hide - log it.",
+      "id": "stack_cubes",
+      "number": "15",
+      "name": "Cube stack",
+      "difficulty": 3,
+      "instruction": "Stack the green cube squarely on the blue one.",
+      "goal": [
+        460,
+        320
+      ],
+      "object": "cubes",
+      "metric": "offset < 8 mm, stack at rest",
+      "summary": "Two free cubes. The carried cube is still a collider while held, so it lands on the base cube instead of passing through it, and the base cube is free to be knocked over by a careless placement.",
+      "success": "Top cube resting on the base cube within 8 mm of centered, base cube not pushed more than 15 mm, both at rest.",
+      "curriculum": [
+        "Base cube square to the table edge",
+        "Top cube yawed relative to the base",
+        "Base cube moved - the plan reads its live pose",
+        "Three-cube tower"
+      ],
+      "failure_modes": [
+        "Placing with a sideways velocity shoves the base cube off its spot",
+        "Releasing too high tips the top cube off the edge"
+      ],
+      "baseline": "Scripted controller",
+      "rigid": {
+        "objects": [
+          {
+            "id": "top",
+            "shape": "box",
+            "size": 30,
+            "position": [
+              450,
+              180
+            ],
+            "yaw": 0.25,
+            "mass": 0.06,
+            "color": "#c9fb5d"
+          },
+          {
+            "id": "base",
+            "shape": "box",
+            "size": 30,
+            "position": [
+              460,
+              320
+            ],
+            "yaw": 0,
+            "mass": 0.08,
+            "color": "#69d2df"
+          }
+        ],
+        "fixtures": [],
+        "goal": {
+          "type": "stack",
+          "object": "top",
+          "on": "base",
+          "tolerance": 8
+        }
+      }
     }
   ],
   "models": [
