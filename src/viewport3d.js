@@ -15,7 +15,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { ARM, ARM_B, clamp, forwardKinematics, GOAL_Z } from './core.js';
 import { ClothSimulator } from './cloth.js';
 import { FOLD_GUIDE } from './fold-guide.js';
-import { toolBasis } from './rigid.js';
+import { fenceWalls, toolBasis } from './rigid.js';
 
 const PX = 100; // scene pixels per world unit
 /** Half the finger gap, world units: open, and closed on a towel corner. */
@@ -226,6 +226,26 @@ function makeRigidScene(spec) {
       group.add(wall);
     }
   }
+  const railMaterial = new THREE.MeshStandardMaterial({ color: 0x8e9aad, roughness: 0.6, metalness: 0.2, transparent: true, opacity: 0.7 });
+  for (const wall of fenceWalls(spec.fence)) {
+    const [length, thickness, height] = wall.size;
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(length / PX, height / PX, thickness / PX), railMaterial);
+    rail.position.copy(toWorld(wall.center));
+    // Scene yaw turns x toward +y (front); in world axes that is about -y.
+    rail.rotation.y = -wall.yaw;
+    rail.receiveShadow = true;
+    group.add(rail);
+  }
+  if (spec.goal.type === 'tower') {
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.19, 0.22, 4, 1),
+      new THREE.MeshBasicMaterial({ color: COLORS.linkAlt, transparent: true, opacity: 0.6, side: THREE.DoubleSide }),
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.rotation.z = Math.PI / 4;
+    ring.position.copy(toWorld([...spec.goal.position, 0.8]));
+    group.add(ring);
+  }
   if (spec.goal.type === 'zone') {
     const [w, d] = spec.goal.size;
     const zone = new THREE.Mesh(
@@ -236,7 +256,8 @@ function makeRigidScene(spec) {
     zone.position.copy(toWorld([...spec.goal.position, 0.8]));
     group.add(zone);
   }
-  return { group, meshes, spec };
+  // Balls come and go; their meshes are pooled by id in layoutRigid.
+  return { group, meshes, spec, balls: new Map() };
 }
 
 /**
@@ -357,7 +378,7 @@ export function syncClothGeometry(cloth) {
   cloth.geometry.computeBoundingSphere();
 }
 
-export function createViewport3D(container, { workspace, onGoalPick, onGoalHeight, onClothFrame }) {
+export function createViewport3D(container, { workspace, onGoalPick, onGoalHeight, onClothFrame, onShoot }) {
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
@@ -504,6 +525,7 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     if (wasDragging || !start || !onGoalPick) return;
     if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 6) return;
     setPointer(event);
+    if (current.rigid?.spec.live && onShoot) { shoot(); return; }
     if (!raycaster.ray.intersectPlane(floorPlane, hit)) return;
     onGoalPick([hit.x * PX + ARM.base[0], hit.z * PX + ARM.base[1]]);
   };
@@ -560,7 +582,44 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
       mesh.position.copy(toWorld([x * 1000, z * 1000, y * 1000]));
       mesh.quaternion.set(...saved.quaternion);
     }
+    const alive = new Set();
+    for (const ball of next.snapshot.projectiles || []) {
+      alive.add(ball.id);
+      let mesh = rigid.balls.get(ball.id);
+      if (!mesh) {
+        mesh = new THREE.Mesh(new THREE.SphereGeometry(ball.size / 2 / PX, 16, 12), new THREE.MeshStandardMaterial({ color: 0xf4f1ea, roughness: 0.3, metalness: 0.1 }));
+        mesh.castShadow = true;
+        rigid.group.add(mesh);
+        rigid.balls.set(ball.id, mesh);
+      }
+      const [x, y, z] = ball.position;
+      mesh.position.copy(toWorld([x * 1000, z * 1000, y * 1000]));
+    }
+    for (const [id, mesh] of rigid.balls) {
+      if (alive.has(id)) continue;
+      rigid.group.remove(mesh);
+      mesh.geometry.dispose();
+      mesh.material.dispose();
+      rigid.balls.delete(id);
+    }
   }
+
+  /**
+   * Task 16: fire at whatever is under the pointer - a cube, the arm, or the
+   * table - from a point back along the view ray, so the ball visibly flies
+   * in from the camera's side and lands where the operator clicked.
+   */
+  const shoot = () => {
+    const targets = [...(rigid ? rigid.meshes.values() : []), ...rigs.flatMap((rig) => (rig.group.visible ? [...rig.links, ...rig.joints] : []))];
+    const [first] = raycaster.intersectObjects(targets, false);
+    const point = first ? first.point : (raycaster.ray.intersectPlane(floorPlane, hit) ? hit.clone() : null);
+    if (!point) return;
+    const toScene = (v) => [v.x * PX + ARM.base[0], v.z * PX + ARM.base[1], v.y * PX];
+    const from = point.clone().addScaledVector(raycaster.ray.direction, -2.5);
+    // Start above the pen wall, so the ball drops in rather than hitting it.
+    from.y = Math.max(from.y, 1);
+    onShoot(toScene(point), toScene(from));
+  };
 
   function layoutCloth() {
     // Task 7 and Task 12 both fold the towel; Task 12's sits on the cell

@@ -7,8 +7,9 @@ import { ClothSimulator, clothCorners } from './cloth.js';
 import { loadClothSettings, onClothSettingsChange } from './cloth-settings.js';
 import { FOLD_GUIDE, FOLD_STAGES, clothPointToScene, foldGuideStage } from './fold-guide.js';
 import { bootstrapPolicy, policyRecipeFor, scoreTaskStages } from './task-policies.js';
-import { FINGER, RigidScene, sceneYaw, snapshotObject, toolBasis } from './rigid.js';
-import { goalCenter, isRigidTask, planRigidTask, rigidOutcome } from './rigid-tasks.js';
+import { FINGER, fenceWalls, RigidScene, sceneYaw, snapshotObject, toolBasis } from './rigid.js';
+import { goalCenter, isLiveRigidTask, isRigidTask, planRigidTask, rigidOutcome } from './rigid-tasks.js';
+import { StackController } from './stack-controller.js';
 
 const $ = (selector) => document.querySelector(selector);
 const fmt = (value, digits = 2) => Number(value).toFixed(digits);
@@ -63,6 +64,10 @@ const state = {
   // place target without editing the task itself.
   rigid: null,
   rigidSpec: null,
+  // Task 16 (Stack under fire): the closed-loop stacker, the physics clock
+  // that keeps the table live while the arm is idle, and shots fired.
+  stack: null,
+  live: { frame: null, last: 0, accumulator: 0, shots: 0 },
 };
 
 const activeArms = () => state.arms.slice(0, state.armCount);
@@ -71,7 +76,72 @@ const runsFullPlan = (workflow) => isClothFoldTask(workflow) || isRigidTask(work
 
 /** Rebuild the rigid-object scene from `state.rigidSpec` (or clear it for other tasks). */
 function buildRigidScene() {
-  state.rigid = state.rigidSpec ? new RigidScene(state.rigidSpec, { arms: state.armCount }) : null;
+  const live = isLiveRigidTask(state.currentWorkflow);
+  state.rigid = state.rigidSpec ? new RigidScene(state.rigidSpec, { arms: state.armCount, armColliders: live }) : null;
+  state.stack = live ? new StackController({ rigid: state.rigidSpec, arm: ARM, safety: compiled.environment.safety }) : null;
+  state.live.shots = 0;
+  if (live) { startLivePhysics(); updateLiveStatus(); } else stopLivePhysics();
+}
+
+/**
+ * Task 16's table never stops: balls fly and cubes tumble whether or not
+ * the arm is running. While the policy runs, its own frames step the
+ * physics; otherwise this clock does, at the 25 Hz control rate, with the
+ * arm held where it is.
+ */
+function startLivePhysics() {
+  if (state.live.frame !== null) return;
+  state.live.last = performance.now();
+  state.live.accumulator = 0;
+  const tick = (now) => {
+    state.live.frame = requestAnimationFrame(tick);
+    // A backgrounded tab resumes without a burst of catch-up steps.
+    state.live.accumulator = Math.min(state.live.accumulator + (now - state.live.last), 200);
+    state.live.last = now;
+    if (state.policy.status === HALT.RUNNING || state.policy.planning) { state.live.accumulator = 0; return; }
+    let stepped = false;
+    while (state.live.accumulator >= 40) {
+      state.live.accumulator -= 40;
+      advanceRigidPhysics();
+      stepped = true;
+    }
+    if (stepped) { updateArms(); updateLiveStatus(); }
+  };
+  state.live.frame = requestAnimationFrame(tick);
+}
+
+function stopLivePhysics() {
+  if (state.live.frame !== null) cancelAnimationFrame(state.live.frame);
+  state.live.frame = null;
+}
+
+/**
+ * Fire a ball at scene point `target` ([x, y, z] px). Without a `from`, it
+ * comes from the far edge of the table, beyond the workspace, high enough
+ * to drop in over the pen wall, on a lob that lands on the target: time of flight from a fixed horizontal speed,
+ * then the vertical speed that drops it onto the target under gravity.
+ */
+function shootAt(target, from = [clamp(target[0], 120, 600), 40, 130]) {
+  if (!state.rigid) return;
+  const g = 9810; // mm/s^2 - scene px are mm
+  const horizontal = Math.hypot(target[0] - from[0], target[1] - from[1]);
+  const t = Math.max(horizontal / 3200, 0.06);
+  const velocity = [
+    (target[0] - from[0]) / t,
+    (target[1] - from[1]) / t,
+    (target[2] - from[2]) / t + 0.5 * g * t,
+  ];
+  state.rigid.spawnProjectile(from, velocity);
+  state.live.shots += 1;
+  updateArms();
+  updateLiveStatus();
+}
+
+function updateLiveStatus() {
+  const element = $('#live-status');
+  if (!state.stack) return;
+  const s = state.stack.status();
+  element.textContent = `Tower ${s.tower}/${s.goal} · best ${s.best} · placed ${s.placed} · recoveries ${s.recoveries} · drops ${s.drops} · misses ${s.misses} · shots ${state.live.shots} · returned ${state.rigid.returned} — ${state.policy.status === HALT.RUNNING ? s.phase : 'arm idle: Run demo policy to start stacking'}`;
 }
 
 /**
@@ -476,6 +546,17 @@ function updateRigid2D() {
     parts.push(`<rect class="rigid-zone${met}" x="${cx - w / 2}" y="${cy - d / 2}" width="${w}" height="${d}" rx="3"/>`);
     parts.push(`<text class="rigid-label" x="${cx}" y="${cy + d / 2 + 14}" text-anchor="middle">${success ? 'PLACED' : 'PLACE ZONE'}</text>`);
   }
+  for (const wall of fenceWalls(spec.fence)) {
+    const [cx, cy] = wall.center;
+    const [length, thickness] = wall.size;
+    parts.push(`<rect class="rigid-fence" x="${fmt(-length / 2, 1)}" y="${fmt(-thickness / 2, 1)}" width="${fmt(length, 1)}" height="${fmt(thickness, 1)}" transform="translate(${fmt(cx, 1)} ${fmt(cy, 1)}) rotate(${fmt((wall.yaw * 180) / Math.PI, 2)})"/>`);
+  }
+  if (spec.goal.type === 'tower') {
+    const [cx, cy] = spec.goal.position;
+    const height = rigidOutcome(spec, state.rigid).height;
+    parts.push(`<rect class="rigid-tower${height >= spec.goal.height ? ' met' : ''}" x="${cx - 21}" y="${cy - 21}" width="42" height="42" rx="3"/>`);
+    parts.push(`<text class="rigid-label" x="${cx}" y="${cy + 36}" text-anchor="middle">TOWER ${height}/${spec.goal.height}</text>`);
+  }
   for (const fixture of spec.fixtures || []) {
     const [cx, cy] = fixture.position;
     const [w, d] = fixture.inner;
@@ -503,6 +584,12 @@ function updateRigid2D() {
       parts.push(rect(sx, sy, object.size / 2, 'class="rigid-shadow"'));
       parts.push(rect(x, y, half, `class="rigid-object${held}" fill="${object.color}"`));
     }
+  }
+  for (const ball of snapshot.projectiles || []) {
+    const [x, y, z] = [ball.position[0] * 1000, ball.position[2] * 1000, ball.position[1] * 1000];
+    const [sx, sy] = castShadow([x, y, Math.max(0, z - ball.size / 2)]);
+    parts.push(`<circle class="rigid-shadow" cx="${fmt(sx, 1)}" cy="${fmt(sy, 1)}" r="${fmt(ball.size / 2, 1)}"/>`);
+    parts.push(`<circle class="rigid-projectile" cx="${fmt(x, 1)}" cy="${fmt(y, 1)}" r="${fmt((ball.size / 2) * (1 + z / 900), 1)}"/>`);
   }
   if (spec.goal.type === 'stack') {
     const base = snapshotObject(snapshot, spec.goal.on).center;
@@ -891,6 +978,7 @@ function setGoalHeight(armId, height, { committed = true } = {}) {
 
 /** Route a scene click to the arm whose base column is nearest, keeping its goal height. */
 function setGoalFromScene(point) {
+  if (state.stack) { shootAt([point[0], point[1], 20]); return; }
   if (state.rigid) { moveRigidGoal(point); return; }
   const arm = nearestArm(point, activeArms().map((armState) => armState.arm));
   const armState = state.arms.find((candidate) => candidate.arm.id === arm.id);
@@ -980,6 +1068,8 @@ async function mountViewport3D() {
       workspace: compiled.environment.safety,
       onGoalPick: (point) => setGoalFromScene(point),
       onGoalHeight: setGoalHeight,
+      // Task 16: a click in 3-D fires along the view ray at whatever it hits.
+      onShoot: (target, from) => shootAt(target, from),
     });
     viewport.instance = instance;
     pushViewportState();
@@ -1147,6 +1237,7 @@ function loadWorkflow(id, { scroll = false } = {}) {
   setHidden($('#cloth-status'), !isClothFoldTask(workflow));
   setHidden($('#cloth-settings-link'), !isClothFoldTask(workflow));
   setHidden($('#fold-direction-picker'), workflow.id !== 'fold_custom');
+  setHidden($('#live-status'), !isLiveRigidTask(workflow));
   $('#cloth-status').textContent = 'Cloth frames 0 / 120';
   // Task 7 always grasps the true corners; only the configurable task varies
   // it, and its own selection re-applies below.
@@ -1202,7 +1293,10 @@ function renderHaltState() {
 
 /** Advance one prevalidated floor- and collision-safe control frame. */
 function policyStep() {
-  const next = state.policy.path?.[state.policy.pathIndex];
+  // Task 16's controller supplies each frame as it goes; it is checked below
+  // exactly like a planned one.
+  const liveFrame = state.stack ? state.stack.next(state.rigid, state.arms[0].q) : null;
+  const next = liveFrame ? [liveFrame.q] : state.policy.path?.[state.policy.pathIndex];
   // Every frame in state.policy.path already passed evaluateCellSafety when
   // it was planned (planSafeCellMotion / reduceSafeCellMotion /
   // planTowelFoldMotion), so running out of frames means the plan finished
@@ -1230,9 +1324,15 @@ function policyStep() {
   state.policy.steps += 1;
   syncSliders();
   advanceClothPhysics();
-  advanceRigidPhysics(state.policy.grips?.[state.policy.pathIndex - 1]);
+  advanceRigidPhysics(liveFrame ? [liveFrame.grip] : state.policy.grips?.[state.policy.pathIndex - 1]);
   updateArms();
   addTransition();
+  if (liveFrame) {
+    // Endless by design: no timeline history (it would grow without bound)
+    // and no budget - it stops only for the operator or the safety envelope.
+    updateLiveStatus();
+    return HALT.RUNNING;
+  }
 
   const clothSnap = state.cloth2d.snapshot();
   state.frameHistory[state.policy.steps] = {
@@ -1312,6 +1412,23 @@ async function runPolicyPlanning(token) {
   }
 
   const poses = activeArms().map(({ q, arm }) => ({ q, arm }));
+  if (state.stack) {
+    // Task 16 has no single plan: the controller decides frame by frame.
+    state.stack.interrupt();
+    state.policy.planning = false;
+    state.policy.planningPhase = null;
+    state.policy.path = null;
+    state.policy.grips = null;
+    state.policy.pathIndex = 0;
+    state.policy.status = HALT.RUNNING;
+    state.policy.steps = 0;
+    state.policy.accumulator = 0;
+    state.policy.solveStartedAt = performance.now();
+    state.frameHistory = [];
+    renderHaltState();
+    state.policy.frame = requestAnimationFrame(policyFrame);
+    return;
+  }
   let motion = null;
   state.policy.planningPhase = 'checking collision-safe route';
   renderHaltState();

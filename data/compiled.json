@@ -701,6 +701,128 @@
           "tolerance": 8
         }
       }
+    },
+    {
+      "id": "stack_fire",
+      "number": "16",
+      "name": "Stack under fire",
+      "family": "rigid",
+      "difficulty": 4,
+      "arms": 1,
+      "horizon_steps": 200,
+      "goal_height": 60,
+      "goal": [
+        455,
+        300
+      ],
+      "object": "cubes",
+      "instruction": "The arm keeps building a three-cube tower. Click the table to shoot balls at it and see whether it copes.",
+      "metric": "tower height, recoveries",
+      "summary": "A robustness test rather than a single episode. The arm stacks continuously while the player fires rigid balls at the cubes, the tower, and the arm itself. Nothing is scripted around the shots: the arm re-reads the physics state and re-plans when its target is knocked away, when a grasp closes on air, when a hit knocks a cube out of its gripper, and when the tower it is placing on has been shot down. The arm's links are colliders too, so balls bounce off it. Everything happens inside a low walled pen shaped to the arm's reach: every point in it can be grasped tool-down and stacked onto the tower at every level, so a knocked cube never lands where the arm is not allowed or able to go.",
+      "success": "The tower is rebuilt to three cubes after every knock-down, while any cube is still within the arm's reach, with every frame inside the safety envelope.",
+      "sensors": "Overhead RGB for cube poses, re-read every control step; gripper width to tell a held cube from an empty close.",
+      "curriculum": [
+        "Let it build undisturbed",
+        "Knock the tower down once it is finished",
+        "Shoot the cube it is about to grasp",
+        "Hit the cube while it is being carried",
+        "Knock a cube out of reach and watch it work with what is left"
+      ],
+      "failure_modes": [
+        "A cube knocked onto another cube or tipped against the pen wall may take several tries to re-grasp",
+        "A ball hitting the tower mid-placement can topple the cube just released",
+        "A cube knocked out of the gripper high enough to clear the pen wall is out of play; once it stops it is returned to a supply spot, and counted"
+      ],
+      "guardrail": "Projectiles and a live arm do not mix outside simulation. On hardware, disturbances come from a person with a push stick, behind a light curtain.",
+      "baseline": "Scripted closed-loop controller",
+      "rigid": {
+        "live": true,
+        "objects": [
+          {
+            "id": "c1",
+            "shape": "box",
+            "size": 30,
+            "position": [
+              421,
+              138
+            ],
+            "yaw": 0.2,
+            "mass": 0.06,
+            "color": "#c9fb5d"
+          },
+          {
+            "id": "c2",
+            "shape": "box",
+            "size": 30,
+            "position": [
+              370,
+              162
+            ],
+            "yaw": -0.3,
+            "mass": 0.06,
+            "color": "#69d2df"
+          },
+          {
+            "id": "c3",
+            "shape": "box",
+            "size": 30,
+            "position": [
+              444,
+              188
+            ],
+            "yaw": 0.5,
+            "mass": 0.06,
+            "color": "#ffbd4a"
+          },
+          {
+            "id": "c4",
+            "shape": "box",
+            "size": 30,
+            "position": [
+              394,
+              212
+            ],
+            "yaw": 0.1,
+            "mass": 0.06,
+            "color": "#ff8a5b"
+          },
+          {
+            "id": "c5",
+            "shape": "box",
+            "size": 30,
+            "position": [
+              442,
+              250
+            ],
+            "yaw": -0.4,
+            "mass": 0.06,
+            "color": "#b99cff"
+          }
+        ],
+        "fixtures": [],
+        "goal": {
+          "type": "tower",
+          "position": [
+            455,
+            300
+          ],
+          "height": 3,
+          "tolerance": 10
+        },
+        "fence": {
+          "center": [
+            436,
+            236
+          ],
+          "size": [
+            252,
+            106
+          ],
+          "angle": 1.134464,
+          "height": 50,
+          "thickness": 6
+        }
+      }
     }
   ],
   "models": [
