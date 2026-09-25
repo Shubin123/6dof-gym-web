@@ -140,6 +140,9 @@ function shootAt(target, from = [clamp(target[0], 120, 600), 40, 130]) {
 function updateLiveStatus() {
   const element = $('#live-status');
   if (!state.stack) return;
+  // Dark slate on the light control panel, set here too so a stale cached
+  // stylesheet can never show the stage's lime accent on the cream panel.
+  element.style.color = '#3b4350';
   const s = state.stack.status();
   element.textContent = `Tower ${s.tower}/${s.goal} · best ${s.best} · placed ${s.placed} · recoveries ${s.recoveries} · drops ${s.drops} · misses ${s.misses} · shots ${state.live.shots} · returned ${state.rigid.returned} — ${state.policy.status === HALT.RUNNING ? s.phase : 'arm idle: Run demo policy to start stacking'}`;
 }
