@@ -1,6 +1,6 @@
 # Testing guide
 
-ArmLab's logic layer (`src/core.js`, `src/cloth.js`, `src/task-policies.js`) is plain, DOM-free JavaScript on purpose, so it runs directly under Node's built-in test runner with no browser, bundler, or mocking framework. The UI layer (`src/main.js`, `src/viewport3d.js`) wires that logic to the DOM and to three.js and is verified by hand in a real browser instead, as described below.
+ArmLab's logic layer (`src/core.js`, `src/cloth.js`, `src/rigid.js`, `src/rigid-plan.js`, `src/rigid-tasks.js`, `src/task-policies.js`) is plain, DOM-free JavaScript on purpose, so it runs directly under Node's built-in test runner with no browser, bundler, or mocking framework. The UI layer (`src/main.js`, `src/viewport3d.js`) wires that logic to the DOM and to three.js and is verified by hand in a real browser instead, as described below.
 
 ## Running the suite
 
@@ -29,6 +29,7 @@ As of this writing the suite is 46 tests across 8 files, all passing, with line 
 | `test/task-policies.test.js` | The declarative policy-recipe registry and the dense per-stage fold reward. |
 | `test/regression.test.js` | Contract-level edge cases the integration tests above only exercise incidentally: `reduceSafeCellMotion`'s `keepTailFrames`/`requiredFrameIndexes` options and its empty-input result, `policyRecipeFor`'s fallback for an unknown task, and `scoreTaskStages`'s neutral-default and fully-solved boundary cases. Added to close the coverage gaps a plain `npm run test:coverage` pass turns up after a change to `core.js` or `task-policies.js`. |
 | `test/dataset-export.test.js` | `buildDatasetManifest`: the empty-input and mixed-arm-count rejections, and that a multi-episode bundle gets correct feature shapes, deduplicated task indices, contiguous global frame indexing, and `next.done`/`next.success` flags. `scripts/lerobot_export.py` (Python, outside `npm test`) is verified by hand against a real downloaded bundle - see its own docstring. |
+| `test/rigid.test.js` | The rigid-object tasks (13-15): objects rest and fall under gravity, tool-down IK points the tool straight down with horizontal jaws, each task's planned pick and place succeeds in the cannon-es simulation with every frame rate-capped and cell-safe, a stale plan closes on air (the grasp is contact-gated, not a magnet), a held cube cannot be lowered through another, and snapshot/restore mid-carry finishes the task identically. |
 
 ## Adding a regression test
 
@@ -45,6 +46,7 @@ When you fix a bug or add a branch to `core.js`, `cloth.js`, or `task-policies.j
    - Switch **2D ↔ 3D**; for Towel fold, confirm the cloth renders and settles instead of teleporting to its folded state.
    - Drag a goal (2D click, or 3D cube drag) and confirm the safety envelope rejects an out-of-bounds move without crashing.
    - Click **Reset** and confirm the scenario returns to its declared home state.
+   - For a rigid-object task (13-15), run the demo policy and confirm it halts with "goal reached" and the object resting on its target in both 2D and 3D; click the table to move the target and run again.
 3. Check the browser console for uncaught errors throughout — a page can render its shell while a data path underneath it is broken.
 
 This is the same check this repository's CI performs implicitly by building successfully (`npm run build` catches import and syntax errors in these files) plus the automated suite above, which validates every code path these files call into. It does not replace looking at the running app after a UI change.

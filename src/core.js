@@ -45,6 +45,9 @@ export const HALT = Object.freeze({
   BUDGET: 'budget',
   OPERATOR: 'operator',
   SAFETY: 'safety',
+  // The plan ran to its end, but the physical outcome missed the goal (a
+  // rigid-object task whose object did not come to rest where it should).
+  MISSED: 'missed',
 });
 
 export const clamp = (value, low, high) => Math.max(low, Math.min(high, value));

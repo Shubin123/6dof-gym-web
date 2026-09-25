@@ -6,6 +6,8 @@ import { ClothSimulator, clothCorners } from './cloth.js';
 import { loadClothSettings, onClothSettingsChange } from './cloth-settings.js';
 import { FOLD_GUIDE, FOLD_STAGES, clothPointToScene, foldGuideStage } from './fold-guide.js';
 import { bootstrapPolicy, policyRecipeFor, scoreTaskStages } from './task-policies.js';
+import { FINGER, RigidScene, sceneYaw, snapshotObject, toolBasis } from './rigid.js';
+import { goalCenter, isRigidTask, planRigidTask, rigidOutcome } from './rigid-tasks.js';
 
 const $ = (selector) => document.querySelector(selector);
 const fmt = (value, digits = 2) => Number(value).toFixed(digits);
@@ -57,9 +59,49 @@ const state = {
   // workspace-boundary checks reject every other corner pair and every
   // swapped-role pair this rig's two fixed-base arms were tried against.
   foldVertex: { A: 'corner', B: 'corner' },
+  // Tasks 13-15 (Rigid objects): the physics scene and the spec it was built
+  // from - a copy of the task's `rigid` block, so a scene click can move the
+  // place target without editing the task itself.
+  rigid: null,
+  rigidSpec: null,
 };
 
 const activeArms = () => state.arms.slice(0, state.armCount);
+/** Tasks whose plan runs to its own end rather than stopping at a goal distance. */
+const runsFullPlan = (workflow) => isClothFoldTask(workflow) || isRigidTask(workflow);
+
+/** Rebuild the rigid-object scene from `state.rigidSpec` (or clear it for other tasks). */
+function buildRigidScene() {
+  state.rigid = state.rigidSpec ? new RigidScene(state.rigidSpec, { arms: state.armCount }) : null;
+}
+
+/**
+ * Step the rigid scene one control frame with the arms where they now are.
+ * Like the cloth, it advances only with an accepted frame - a policy step or
+ * a manual move - so both viewports and the timeline show one physical state.
+ * `grips` is the plan's gripper command; a manual move passes none and the
+ * jaws keep whatever state they are in, still pushing whatever they touch.
+ */
+function advanceRigidPhysics(grips) {
+  state.rigid?.step({ arms: activeArms().map(({ q, arm }) => ({ q, arm })), grips });
+}
+
+/**
+ * Move a rigid task's place target - the zone, the tray, or the base cube of
+ * a stack - to a clicked table point, and start the scene over around it.
+ */
+function moveRigidGoal([x, y]) {
+  const [minX, maxX, minY, maxY] = compiled.environment.safety.goal_workspace;
+  const point = [clamp(x, minX + 30, maxX - 30), clamp(y, minY + 30, maxY - 30)];
+  const spec = structuredClone(state.rigidSpec);
+  const { goal } = spec;
+  if (goal.type === 'zone') goal.position = point;
+  else if (goal.type === 'tray') spec.fixtures.find((fixture) => fixture.id === goal.fixture).position = point;
+  else spec.objects.find((object) => object.id === goal.on).position = point;
+  state.rigidSpec = spec;
+  haltPolicy(HALT.IDLE, { silent: true });
+  resetArms({ keepRigidSpec: true });
+}
 const controlledArm = () => state.arms[state.activeArm];
 const isClothFoldTask = (workflow) => workflow.id === 'fold' || workflow.id === 'fold_custom';
 
@@ -342,6 +384,20 @@ function updateArms() {
       class: pointIndex === points.length - 1 ? 'joint small' : 'joint',
     })));
     const [x, y] = points.at(-1);
+    if (state.rigid) {
+      // The rigid tasks' fingers are colliders; draw them where they are:
+      // either side of the tip along the jaw axis, at the physical gap.
+      const { lateral } = toolBasis(forward, forwardKinematics(armState.q, armState.arm).up);
+      const [lx, ly] = [lateral[0], lateral[2]]; // world (x, z) is scene (x, y)
+      const gap = state.rigid.grippers[index]?.halfGap ?? FINGER.openHalfGap;
+      const [wx, wy] = [-ly * 6, lx * 6];
+      const fingers = [-1, 1].map((side) => {
+        const [cx, cy] = [x + lx * side * gap, y + ly * side * gap];
+        return `<path class="rigid-finger" d="M${fmt(cx - wx, 1)} ${fmt(cy - wy, 1)}L${fmt(cx + wx, 1)} ${fmt(cy + wy, 1)}"/>`;
+      }).join('');
+      group.querySelector('.gripper').innerHTML = fingers;
+      return;
+    }
     // Seen from above, the jaws run back from the tip along the tool's
     // ground-projected forward vector (short when the tool points down) and
     // meet at the tip, where they close on whatever they hold.
@@ -361,6 +417,7 @@ function updateArms() {
   });
   updateGoals();
   updateCloth2D();
+  updateRigid2D();
   pushViewportState();
   updateTelemetry();
 }
@@ -371,8 +428,9 @@ function updateCloth2D() {
   const isFold = isClothFoldTask(state.currentWorkflow);
   setHidden(clothGroup, !isFold);
   // The fold plan does not chase per-arm goal cubes; the fold guide below
-  // shows what each arm is doing instead.
-  setHidden($('#goals'), isFold);
+  // shows what each arm is doing instead. The rigid tasks' goal is where
+  // the object ends up, drawn by updateRigid2D.
+  setHidden($('#goals'), isFold || Boolean(state.rigid));
   if (!isFold) return;
 
   const { basePoints, creasePoints } = state.cloth2d.get2DPolygons([325, 240], 100);
@@ -388,6 +446,60 @@ function updateCloth2D() {
     <path class="cloth-2d-crease" d="${creaseString(creasePoints)}" />
     ${isCustom ? configurableFoldGuideSvg() : foldGuideSvg()}
   `;
+}
+
+/**
+ * Top-down view of the rigid scene: the place target, then every object
+ * lowest first with a cast shadow, scaled by height like the arm joints.
+ */
+function updateRigid2D() {
+  const group = $('#rigid-2d');
+  setHidden(group, !state.rigid);
+  if (!state.rigid) return;
+  const spec = state.rigidSpec;
+  const snapshot = state.rigid.snapshot();
+  const { success, placed } = rigidOutcome(spec, state.rigid);
+  const met = placed ? ' met' : '';
+  const parts = [];
+  if (spec.goal.type === 'zone') {
+    const [cx, cy] = spec.goal.position;
+    const [w, d] = spec.goal.size;
+    parts.push(`<rect class="rigid-zone${met}" x="${cx - w / 2}" y="${cy - d / 2}" width="${w}" height="${d}" rx="3"/>`);
+    parts.push(`<text class="rigid-label" x="${cx}" y="${cy + d / 2 + 14}" text-anchor="middle">${success ? 'PLACED' : 'PLACE ZONE'}</text>`);
+  }
+  for (const fixture of spec.fixtures || []) {
+    const [cx, cy] = fixture.position;
+    const [w, d] = fixture.inner;
+    const t = fixture.wall ?? 4;
+    const isGoal = spec.goal.fixture === fixture.id;
+    parts.push(`<rect class="rigid-tray${isGoal ? met : ''}" x="${cx - w / 2 - t / 2}" y="${cy - d / 2 - t / 2}" width="${w + t}" height="${d + t}" rx="2"/>`);
+    if (isGoal) parts.push(`<text class="rigid-label" x="${cx}" y="${cy + d / 2 + 18}" text-anchor="middle">${success ? 'IN TRAY' : 'TRAY'}</text>`);
+  }
+  const objects = spec.objects.map((object) => ({ object, ...snapshotObject(snapshot, object.id) }))
+    .sort((a, b) => a.center[2] - b.center[2]);
+  const heldIds = new Set(state.rigid.grippers.map((gripper) => gripper.held?.id).filter(Boolean));
+  for (const { object, center, quaternion } of objects) {
+    const [x, y, z] = center;
+    const scale = 1 + z / 900;
+    const half = (object.size / 2) * scale;
+    const [sx, sy] = castShadow([x, y, Math.max(0, z - object.size / 2)]);
+    const held = heldIds.has(object.id) ? ' held' : '';
+    if (object.shape === 'sphere') {
+      parts.push(`<circle class="rigid-shadow" cx="${fmt(sx, 1)}" cy="${fmt(sy, 1)}" r="${fmt(object.size / 2, 1)}"/>`);
+      parts.push(`<circle class="rigid-object${held}" cx="${fmt(x, 1)}" cy="${fmt(y, 1)}" r="${fmt(half, 1)}" fill="${object.color}"/>`);
+      parts.push(`<circle cx="${fmt(x - half * 0.3, 1)}" cy="${fmt(y - half * 0.3, 1)}" r="${fmt(half * 0.3, 1)}" fill="#fff" opacity=".35"/>`);
+    } else {
+      const yaw = (sceneYaw(quaternion) * 180) / Math.PI;
+      const rect = (cx, cy, h, extra) => `<rect ${extra} x="${fmt(-h, 1)}" y="${fmt(-h, 1)}" width="${fmt(2 * h, 1)}" height="${fmt(2 * h, 1)}" rx="2" transform="translate(${fmt(cx, 1)} ${fmt(cy, 1)}) rotate(${fmt(yaw, 1)})"/>`;
+      parts.push(rect(sx, sy, object.size / 2, 'class="rigid-shadow"'));
+      parts.push(rect(x, y, half, `class="rigid-object${held}" fill="${object.color}"`));
+    }
+  }
+  if (spec.goal.type === 'stack') {
+    const base = snapshotObject(snapshot, spec.goal.on).center;
+    parts.push(`<text class="rigid-label" x="${fmt(base[0], 1)}" y="${fmt(base[1] + 34, 1)}" text-anchor="middle">${success ? 'STACKED' : 'STACK HERE'}</text>`);
+  }
+  group.innerHTML = parts.join('');
 }
 
 /**
@@ -573,6 +685,7 @@ function loadSimulationStep(stepIndex) {
       viewport.instance?.restoreCloth?.(historyEntry.clothSnapshot);
       state.cloth2d?.restore?.(historyEntry.clothSnapshot);
     }
+    if (historyEntry.rigidSnapshot) state.rigid?.restore(historyEntry.rigidSnapshot);
   } else if (state.policy.path?.[stepIndex]) {
     const frame = state.policy.path[stepIndex];
     activeArms().forEach((armState, index) => {
@@ -626,7 +739,9 @@ function pushViewportState() {
       q: [...armState.q],
       goal: [...armState.goal],
       gripping: gripping(index),
+      fingerHalfGap: state.rigid ? state.rigid.grippers[index]?.halfGap ?? FINGER.openHalfGap : null,
     })),
+    rigid: state.rigid ? { spec: state.rigidSpec, snapshot: state.rigid.snapshot() } : null,
     taskId: state.currentWorkflow.id,
     policyProgress: state.policy.path?.length ? state.policy.pathIndex / state.policy.path.length : 0,
     clothSnapshot: state.cloth2d.snapshot(),
@@ -640,10 +755,13 @@ function pushViewportState() {
 
 const tipOf = (armState) => forwardKinematics(armState.q, armState.arm).points.at(-1);
 /** Whether arm `index` has a towel corner in its closed gripper. */
-const gripping = (index) => isClothFoldTask(state.currentWorkflow) && Boolean(state.cloth2d.captured[index]);
+const gripping = (index) => (state.rigid
+  ? Boolean(state.rigid.grippers[index]?.closed)
+  : isClothFoldTask(state.currentWorkflow) && Boolean(state.cloth2d.captured[index]));
 const armError = (armState) => distance(tipOf(armState), armState.goal);
 
 function updateTelemetry() {
+  if (state.rigid) { updateRigidTelemetry(); return; }
   const errors = activeArms().map(armError);
   const worst = Math.max(...errors);
   const reward = -worst / 100 - 0.001 * activeArms().reduce((sum, armState) => sum + armState.q.reduce((inner, q) => inner + q * q, 0), 0);
@@ -662,6 +780,23 @@ function updateTelemetry() {
   const safetyCopy = { floor: 'Blocked at floor', workspace: 'Blocked at floor edge', collision: 'Blocked arm collision', rate: 'Blocked joint-step jump' };
   $('#safety-state').textContent = reason ? safetyCopy[reason] : atLimit ? 'At a joint limit' : 'Within floor + collision limits';
   $('#safety-state').style.color = reason || atLimit ? '#b04a24' : '#45861a';
+}
+
+/** Rigid tasks score the object, not the tool: its distance to the goal, and whether it is placed and at rest. */
+function updateRigidTelemetry() {
+  const outcome = rigidOutcome(state.rigidSpec, state.rigid);
+  $('#distance').textContent = `object ${fmt(outcome.error / 10, 1)} cm`;
+  $('#tool-height').textContent = activeArms().map((armState) => `${fmt(tipOf(armState)[2] / 10, 1)}`).join(' / ') + ' cm';
+  $('#reward').textContent = fmt(outcome.success ? 0 : -outcome.error / 100, 3);
+  $('#step').textContent = `${state.step} / ${compiled.environment.max_steps}`;
+  const score = outcome.success ? 100 : clamp(90 - outcome.error / 2.7, 0, 90);
+  $('#reward-bar').style.width = `${score}%`;
+  $('#reward-bar-value').textContent = `${Math.round(score)}%`;
+  const actualSafety = evaluateCellSafety(activeArms().map(({ q, arm }) => ({ q, arm })), compiled.environment.safety);
+  const reason = state.safetyNotice || actualSafety.reason;
+  const safetyCopy = { floor: 'Blocked at floor', workspace: 'Blocked at floor edge', collision: 'Blocked arm collision', rate: 'Blocked joint-step jump' };
+  $('#safety-state').textContent = reason ? safetyCopy[reason] : outcome.held ? 'Holding object' : 'Within floor + collision limits';
+  $('#safety-state').style.color = reason ? '#b04a24' : '#45861a';
 }
 
 function syncSliders() {
@@ -729,6 +864,7 @@ function setGoalHeight(armId, height, { committed = true } = {}) {
 
 /** Route a scene click to the arm whose base column is nearest, keeping its goal height. */
 function setGoalFromScene(point) {
+  if (state.rigid) { moveRigidGoal(point); return; }
   const arm = nearestArm(point, activeArms().map((armState) => armState.arm));
   const armState = state.arms.find((candidate) => candidate.arm.id === arm.id);
   setArmGoal(armState, [point[0], point[1], armState.goal[2]]);
@@ -973,7 +1109,9 @@ function loadWorkflow(id, { scroll = false } = {}) {
   // solver to relax) currently runs to ~477 steps; give it enough budget to
   // finish without truncating the settle tail, matching the raised ceiling
   // in policyBudget() and the slider's max in index.html.
-  state.policy.budget = isClothFoldTask(workflow) ? FOLD_STEP_BUDGET : workflow.horizon_steps;
+  // The rigid tasks' pick-and-place plans (~380 steps with their settle
+  // tail) also outrun a 200-step horizon, and share the same ceiling.
+  state.policy.budget = runsFullPlan(workflow) ? FOLD_STEP_BUDGET : workflow.horizon_steps;
   state.policy.loop = isClothFoldTask(workflow);
   $('#policy-loop').checked = state.policy.loop;
   $('#policy-budget').value = state.policy.budget;
@@ -989,6 +1127,8 @@ function loadWorkflow(id, { scroll = false } = {}) {
   state.cloth2d?.reset();
   applyFoldVertexSelection();
   viewport.instance?.resetCloth?.();
+  state.rigidSpec = isRigidTask(workflow) ? structuredClone(workflow.rigid) : null;
+  buildRigidScene();
   state.frameHistory = [];
   state.timeline.currentStep = 0;
   state.timeline.scrubbing = false;
@@ -1021,6 +1161,7 @@ const HALT_COPY = {
   [HALT.BUDGET]: () => `Halted · step budget exhausted at ${state.policy.steps}`,
   [HALT.OPERATOR]: () => `Halted by operator at step ${state.policy.steps}`,
   [HALT.SAFETY]: () => `Halted · safety boundary at step ${state.policy.steps}`,
+  [HALT.MISSED]: () => `Halted · plan finished at step ${state.policy.steps}, object not at goal`,
 };
 
 function renderHaltState() {
@@ -1040,7 +1181,8 @@ function policyStep() {
   // planTowelFoldMotion), so running out of frames means the plan finished
   // safely, not that anything was unsafe - report it as reached rather than
   // a safety halt.
-  if (!next) return HALT.REACHED;
+  // A rigid task is scored on where the object physically came to rest.
+  if (!next) return state.rigid && !rigidOutcome(state.rigidSpec, state.rigid).success ? HALT.MISSED : HALT.REACHED;
   // Validate a live frame before state changes. This defense-in-depth check
   // prevents a malformed path from teleporting an arm between safe poses.
   const exceedsJointStep = next.some((q, index) => q.some((value, joint) => (
@@ -1061,6 +1203,7 @@ function policyStep() {
   state.policy.steps += 1;
   syncSliders();
   advanceClothPhysics();
+  advanceRigidPhysics(state.policy.grips?.[state.policy.pathIndex - 1]);
   updateArms();
   addTransition();
 
@@ -1069,6 +1212,7 @@ function policyStep() {
     step: state.step,
     arms: activeArms().map((a) => ({ q: [...a.q], goal: [...a.goal], lastAction: [...a.lastAction] })),
     clothSnapshot: clothSnap,
+    rigidSnapshot: state.rigid?.snapshot(),
   };
   updateTimelineSlider();
 
@@ -1080,7 +1224,9 @@ function policyStep() {
   // fold runs to the end of its own deterministic, pre-validated plan
   // instead - reached via the frame-exhaustion check above, bounded by the
   // step budget below like any other task.
-  if (isClothFoldTask(state.currentWorkflow)) {
+  // The rigid tasks' tool goal is likewise only a waypoint; they are
+  // scored when their plan (which ends in a settle hold) runs out.
+  if (runsFullPlan(state.currentWorkflow)) {
     return state.policy.steps >= policyBudget() ? HALT.BUDGET : HALT.RUNNING;
   }
   return haltState({ error, steps: state.policy.steps, budget: policyBudget() });
@@ -1159,7 +1305,19 @@ async function runPolicyPlanning(token) {
       profile,
     );
   }
-  if (!motion) {
+  if (state.rigid) {
+    state.policy.planningPhase = 'planning top-down grasp';
+    renderHaltState();
+    await yieldForSolverFeedback();
+    if (!isCurrent()) return;
+    // Planned from the objects' live poses, not the task file: a cube that
+    // has been knocked or moved is grasped where it actually is.
+    motion = planRigidTask(state.rigidSpec, state.rigid, poses[0], compiled.environment.safety);
+    // A rigid task has no fallback plan: the generic reach below would
+    // arrive at its goal tool-first without ever closing the gripper.
+    if (!motion) motion = false;
+  }
+  if (motion === null) {
     motion = planSafeCellMotion(
       poses,
       activeArms().map(({ plan }) => plan.q),
@@ -1201,6 +1359,7 @@ async function runPolicyPlanning(token) {
     step: state.step,
     arms: activeArms().map((a) => ({ q: [...a.q], goal: [...a.goal], lastAction: [...a.lastAction] })),
     clothSnapshot: clothSnap,
+    rigidSnapshot: state.rigid?.snapshot(),
   }];
 
   renderHaltState();
@@ -1237,7 +1396,7 @@ function haltPolicy(status = HALT.OPERATOR, { silent = false } = {}) {
   renderHaltState();
 }
 
-function resetArms() {
+function resetArms({ keepRigidSpec = false } = {}) {
   const workflow = state.currentWorkflow;
   for (const armState of state.arms) {
     armState.q = [...HOME_POSE];
@@ -1263,6 +1422,10 @@ function resetArms() {
   state.timeline.scrubbing = false;
   state.cloth2d?.reset();
   viewport.instance?.resetCloth?.();
+  // Objects go back to their start poses; a moved place target is kept only
+  // when the move itself asked for the reset.
+  if (!keepRigidSpec && isRigidTask(workflow)) state.rigidSpec = structuredClone(workflow.rigid);
+  buildRigidScene();
   // The sim-time readout and any pending voice auto-stop are timers, not
   // policy/episode state, and neither was touched here — the clock kept
   // counting from page load and a running capture kept its own countdown
@@ -1315,6 +1478,7 @@ function onSceneDragMove(event) {
   armState.goal = projectToReachableWorkspace([x, y, armState.goal[2]], compiled.environment.safety, armState.arm);
   state.step += 1;
   syncSliders();
+  advanceRigidPhysics();
   updateArms();
   addTransition();
 }
@@ -1477,6 +1641,7 @@ function makeSliders() {
     armState.lastAction[index] = clamp(armState.q[index] - previous, -ARM.maxActionDelta, ARM.maxActionDelta);
     state.step += 1;
     syncSliders();
+    advanceRigidPhysics();
     updateArms();
     addTransition();
   }));

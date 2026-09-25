@@ -15,12 +15,12 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { ARM, ARM_B, clamp, forwardKinematics, GOAL_Z } from './core.js';
 import { ClothSimulator } from './cloth.js';
 import { FOLD_GUIDE } from './fold-guide.js';
+import { toolBasis } from './rigid.js';
 
 const PX = 100; // scene pixels per world unit
 /** Half the finger gap, world units: open, and closed on a towel corner. */
 const GRIPPER_GAP = Object.freeze({ open: 0.09, closed: 0.025 });
 const UP = new THREE.Vector3(0, 1, 0);
-const FORWARD = new THREE.Vector3(1, 0, 0);
 const COLORS = {
   floor: 0x131925,
   grid: 0x2b3648,
@@ -181,6 +181,62 @@ function makeGoal(mirrored) {
   group.add(grip);
 
   return { group, cube, beam, grip, handles, handleMaterial };
+}
+
+/**
+ * The rigid tasks' scene: one mesh per object (its pose copied from the
+ * physics snapshot every frame), the tray walls, and the place zone. Rebuilt
+ * whenever the task's spec changes, e.g. when a click moves the target.
+ */
+function makeRigidScene(spec) {
+  const group = new THREE.Group();
+  const meshes = new Map();
+  for (const object of spec.objects) {
+    const size = object.size / PX;
+    const material = new THREE.MeshStandardMaterial({ color: object.color, roughness: 0.45, metalness: 0.05 });
+    const mesh = object.shape === 'sphere'
+      ? new THREE.Mesh(new THREE.SphereGeometry(size / 2, 28, 18), material)
+      : new THREE.Mesh(new THREE.BoxGeometry(size, size, size), material);
+    if (object.shape === 'sphere') {
+      // A band round the equator makes the ball's roll visible.
+      const band = new THREE.Mesh(new THREE.TorusGeometry(size / 2, size * 0.04, 8, 32), new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5 }));
+      mesh.add(band);
+    } else {
+      mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0x0e131d, transparent: true, opacity: 0.5 })));
+    }
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+    meshes.set(object.id, mesh);
+  }
+  for (const fixture of spec.fixtures || []) {
+    const [cx, cy] = fixture.position;
+    const [w, d] = fixture.inner;
+    const t = fixture.wall ?? 4;
+    const hgt = fixture.height ?? 18;
+    const material = new THREE.MeshStandardMaterial({ color: 0x8e9aad, roughness: 0.6, metalness: 0.2 });
+    for (const [x, y, sx, sy] of [
+      [cx, cy - d / 2 - t / 2, w + 2 * t, t], [cx, cy + d / 2 + t / 2, w + 2 * t, t],
+      [cx - w / 2 - t / 2, cy, t, d], [cx + w / 2 + t / 2, cy, t, d],
+    ]) {
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(sx / PX, hgt / PX, sy / PX), material);
+      wall.position.copy(toWorld([x, y, hgt / 2]));
+      wall.castShadow = true;
+      wall.receiveShadow = true;
+      group.add(wall);
+    }
+  }
+  if (spec.goal.type === 'zone') {
+    const [w, d] = spec.goal.size;
+    const zone = new THREE.Mesh(
+      new THREE.PlaneGeometry(w / PX, d / PX),
+      new THREE.MeshBasicMaterial({ color: COLORS.linkAlt, transparent: true, opacity: 0.22, depthWrite: false }),
+    );
+    zone.rotation.x = -Math.PI / 2;
+    zone.position.copy(toWorld([...spec.goal.position, 0.8]));
+    group.add(zone);
+  }
+  return { group, meshes, spec };
 }
 
 /**
@@ -474,6 +530,37 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
 
   let current = { arms: [], taskId: null, policyProgress: 0, clothSnapshot: null };
   let frame = null;
+  let rigid = null;
+
+  function disposeTree(root) {
+    root.traverse((node) => {
+      if (node.geometry) node.geometry.dispose();
+      if (node.material) (Array.isArray(node.material) ? node.material : [node.material]).forEach((material) => material.dispose());
+    });
+  }
+
+  function layoutRigid() {
+    const next = current.rigid;
+    if (rigid && rigid.spec !== next?.spec) {
+      scene.remove(rigid.group);
+      disposeTree(rigid.group);
+      rigid = null;
+    }
+    if (!next) return;
+    if (!rigid) {
+      rigid = makeRigidScene(next.spec);
+      scene.add(rigid.group);
+    }
+    // Physics already runs in this view's axes (x right, y up, z front), so
+    // an object's quaternion goes straight onto its mesh.
+    for (const saved of next.snapshot.objects) {
+      const mesh = rigid.meshes.get(saved.id);
+      if (!mesh) continue;
+      const [x, y, z] = saved.position;
+      mesh.position.copy(toWorld([x * 1000, z * 1000, y * 1000]));
+      mesh.quaternion.set(...saved.quaternion);
+    }
+  }
 
   function layoutCloth() {
     cloth.group.visible = current.taskId === 'fold';
@@ -517,10 +604,17 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
 
     const tip = world.at(-1);
     rig.tool.position.copy(tip);
-    // Scene axes are (x, depth, height); the world's are (x, height, depth).
-    rig.tool.quaternion.setFromUnitVectors(FORWARD, new THREE.Vector3(forward[0], forward[2], forward[1]).normalize());
+    // The tool frame is the kinematic one - x along the tool, z the axis the
+    // jaws open along - the same frame the rigid tasks' finger colliders use.
+    const { up } = forwardKinematics(armState.q, rig.arm);
+    const basis = toolBasis(forward, up);
+    rig.tool.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(
+      new THREE.Vector3(...basis.forward), new THREE.Vector3(...basis.normal), new THREE.Vector3(...basis.lateral),
+    ));
     const closed = Boolean(armState.gripping);
-    rig.fingers.forEach((finger) => { finger.position.z = finger.userData.side * (closed ? GRIPPER_GAP.closed : GRIPPER_GAP.open); });
+    // A rigid task reports the physical finger gap; the towel grip is a fixed pinch.
+    const gap = armState.fingerHalfGap != null ? armState.fingerHalfGap / PX : (closed ? GRIPPER_GAP.closed : GRIPPER_GAP.open);
+    rig.fingers.forEach((finger) => { finger.position.z = finger.userData.side * gap; });
 
     const goal = toWorld(armState.goal);
     rig.goal.group.position.set(goal.x, 0, goal.z);
@@ -537,7 +631,7 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     const motionLine = motionLines[rig.arm.id === 'B' ? 1 : 0];
     motionLine.geometry.setFromPoints(curve.getPoints(32));
     motionLine.computeLineDistances();
-    motionLine.visible = current.taskId !== 'fold';
+    motionLine.visible = current.taskId !== 'fold' && !current.rigid;
   }
 
   function layout() {
@@ -546,12 +640,14 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
       const visible = Boolean(armState);
       rig.group.visible = visible;
       // The fold plan does not chase goal cubes; the fold guide replaces them.
-      const showGoal = visible && current.taskId !== 'fold';
+      // Neither do the rigid tasks, whose goal is where the object ends up.
+      const showGoal = visible && current.taskId !== 'fold' && !current.rigid;
       rig.goal.group.visible = showGoal;
       motionLines[index].visible = showGoal;
       if (visible) layoutArm(rig, armState);
     });
     layoutCloth();
+    layoutRigid();
   }
 
   function loop() {
