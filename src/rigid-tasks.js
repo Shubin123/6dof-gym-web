@@ -7,6 +7,7 @@
  *   { type: 'zone',  object, position: [x, y], size: [w, d] }  object resting inside a floor zone
  *   { type: 'tray',  object, fixture }                         object inside a tray's walls
  *   { type: 'stack', object, on, tolerance }                   object resting squarely on another
+ *   { type: 'tower', position: [x, y], height, tolerance }     a column of `height` cubes (the live task)
  */
 import { planPickPlaceMotion } from './rigid-plan.js';
 
@@ -16,13 +17,43 @@ export const GRASP_HEIGHT = 8;
 const RELEASE_GAP = 2;
 
 export const isRigidTask = (workflow) => Boolean(workflow?.rigid);
+/** A task whose physics runs continuously and whose arm is driven by a controller, not one plan. */
+export const isLiveRigidTask = (workflow) => Boolean(workflow?.rigid?.live);
+
+/**
+ * The cubes that currently form the tower at `goal.position`, bottom first:
+ * level k must rest k cube-heights up, within `tolerance` of the column's
+ * axis and of the cube below. Counting stops at the first gap, so a cube
+ * left on a knocked-over tower's rubble does not count. Held cubes never do.
+ * Counted by position alone unless `speed` (m/s) is given: stacked cubes
+ * jitter slightly in the solver, and a tower must not flicker in and out.
+ */
+export function towerStack(rigid, scene, { speed = Infinity } = {}) {
+  const { goal } = rigid;
+  const tolerance = goal.tolerance ?? 10;
+  const held = new Set(scene.grippers.map((gripper) => gripper.held?.id).filter(Boolean));
+  const cubes = scene.objects
+    .filter((object) => object.shape === 'box' && !held.has(object.id) && object.body.velocity.length() < speed)
+    .map((object) => ({ object, center: scene.objectCenter(object.id) }))
+    .filter(({ center }) => flat(center, goal.position) <= tolerance)
+    .sort((a, b) => a.center[2] - b.center[2]);
+  const tower = [];
+  for (const entry of cubes) {
+    const level = tower.length;
+    const expected = entry.object.size / 2 + level * entry.object.size;
+    if (Math.abs(entry.center[2] - expected) > 5) continue;
+    if (level && flat(entry.center, tower[level - 1].center) > tolerance) break;
+    tower.push(entry);
+  }
+  return tower.map(({ object }) => object.id);
+}
 
 const flat = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 
 /** Scene-space footprint center [x, y] of a task's goal, for drawing and for the planner. */
 export function goalCenter(rigid) {
   const { goal } = rigid;
-  if (goal.type === 'zone') return goal.position;
+  if (goal.type === 'zone' || goal.type === 'tower') return goal.position;
   if (goal.type === 'tray') return rigid.fixtures.find((fixture) => fixture.id === goal.fixture).position;
   return null; // 'stack' follows the base object, which is live state
 }
@@ -67,6 +98,11 @@ export function planRigidTask(rigid, scene, pose, safety) {
  */
 export function rigidOutcome(rigid, scene) {
   const { goal } = rigid;
+  if (goal.type === 'tower') {
+    const height = towerStack(rigid, scene).length;
+    const placed = height >= goal.height;
+    return { success: placed, placed, resting: true, held: scene.grippers.some((gripper) => gripper.held), error: (goal.height - height) * 30, height };
+  }
   const object = scene.object(goal.object);
   const center = scene.objectCenter(goal.object);
   const half = object.size / 2;

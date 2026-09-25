@@ -7,7 +7,8 @@ import { planPickPlaceMotion, solveToolDownIK, TOOL_DOWN_TOLERANCE } from '../sr
 import { isRigidTask, pickPlacePoints, planRigidTask, rigidOutcome } from '../src/rigid-tasks.js';
 
 const safety = compiled.environment.safety;
-const rigidTasks = compiled.workflows.filter(isRigidTask);
+// The single-plan rigid tasks; Task 16 (live, controller-driven) has its own file.
+const rigidTasks = compiled.workflows.filter((task) => isRigidTask(task) && !task.rigid.live);
 const home = () => ({ q: [...HOME_POSE], arm: ARM });
 
 /** Run a plan through a scene; return the frame index each grasp took hold, if any. */

@@ -18,7 +18,7 @@
  * DOM-free on purpose, like cloth.js: it runs under `node --test`.
  */
 import * as CANNON from 'cannon-es';
-import { forwardKinematics } from './core.js';
+import { ARM, forwardKinematics } from './core.js';
 
 const MM = 0.001;
 /** Physics substep. 500 Hz matches environment.physics_hz; 20 per 25 Hz control frame. */
@@ -32,6 +32,23 @@ export const CONTROL_DT = 1 / 25;
  * yaw (its half-diagonal is 21 mm).
  */
 export const FINGER = Object.freeze({ length: 22, width: 5, thickness: 4, openHalfGap: 26, minHalfGap: 3 });
+
+/**
+ * The player's balls: a 16 mm, 25 g sphere. `gripBreakImpulse` (N·s) is how
+ * hard a hit on a held cube or its fingers must be to knock it loose - a
+ * ball at about 3 m/s head-on, so a glancing or slow hit does not.
+ */
+export const PROJECTILE = Object.freeze({ diameter: 16, mass: 0.025, maxAlive: 16, lifetime: 12, gripBreakImpulse: 0.075 });
+
+/**
+ * Arm link colliders: a slab per link, half-width in mm. The last link's
+ * stops `TOOL_CLEAR` short of the tip: with the tool pointing down that link
+ * runs straight through the jaw space, and a collider there would shove the
+ * cube aside on the way down instead of letting the fingers straddle it.
+ */
+const LINK_HALF_WIDTH = 9;
+const TOOL_CLEAR = FINGER.length + 12;
+const ARM_LINK_LENGTHS = ARM.lengths.map((length, link) => (link === ARM.lengths.length - 1 ? length - TOOL_CLEAR : length));
 
 export const toPhysics = ([x, y, z = 0]) => new CANNON.Vec3(x * MM, z * MM, y * MM);
 export const toScene = (v) => [v.x / MM, v.z / MM, v.y / MM];
@@ -83,6 +100,49 @@ function basisQuaternion({ forward: x, normal: y, lateral: z }) {
   return new CANNON.Quaternion(qx, qy, qz, qw).normalize();
 }
 
+/**
+ * The four walls of a task's fence, as { center: [x, y, z], size: [length,
+ * thickness, height], yaw } in scene units. A fence is a rectangle whose
+ * inner faces are `size` ([along, across], px) around `center`, turned by
+ * `angle` (rad, scene yaw) - or, for an axis-aligned one, just `bounds`
+ * ([minX, maxX, minY, maxY]).
+ */
+export function fenceWalls(fence) {
+  if (!fence) return [];
+  const t = fence.thickness ?? 6;
+  const hgt = fence.height ?? 30;
+  let { center, size, angle = 0 } = fence;
+  if (fence.bounds) {
+    const [x0, x1, y0, y1] = fence.bounds;
+    center = [(x0 + x1) / 2, (y0 + y1) / 2];
+    size = [x1 - x0, y1 - y0];
+    angle = 0;
+  }
+  const [a, b] = size;
+  const [c, s] = [Math.cos(angle), Math.sin(angle)];
+  const at = (u, v) => [center[0] + u * c - v * s, center[1] + u * s + v * c, hgt / 2];
+  return [
+    { center: at(0, -b / 2 - t / 2), size: [a + 2 * t, t, hgt], yaw: angle },
+    { center: at(0, b / 2 + t / 2), size: [a + 2 * t, t, hgt], yaw: angle },
+    { center: at(-a / 2 - t / 2, 0), size: [t, b, hgt], yaw: angle },
+    { center: at(a / 2 + t / 2, 0), size: [t, b, hgt], yaw: angle },
+  ];
+}
+
+/** Whether scene point [x, y] lies inside a fence's inner faces, less `margin` px. */
+export function insideFence(fence, [x, y], margin = 0) {
+  if (!fence) return true;
+  if (fence.bounds) {
+    const [x0, x1, y0, y1] = fence.bounds;
+    return x >= x0 + margin && x <= x1 - margin && y >= y0 + margin && y <= y1 - margin;
+  }
+  const [c, s] = [Math.cos(fence.angle ?? 0), Math.sin(fence.angle ?? 0)];
+  const [dx, dy] = [x - fence.center[0], y - fence.center[1]];
+  const u = dx * c + dy * s;
+  const v = -dx * s + dy * c;
+  return Math.abs(u) <= fence.size[0] / 2 - margin && Math.abs(v) <= fence.size[1] / 2 - margin;
+}
+
 /** Tool pose from an arm's joints: tip (world, m), orientation, and basis. */
 export function toolPose(q, arm) {
   const { points, forward, up } = forwardKinematics(q, arm);
@@ -110,9 +170,22 @@ function supportHalf(body, dir) {
  *   fixtures: [{ id, type: 'tray', position: [x, y], inner: [w, d], wall, height }]
  */
 export class RigidScene {
-  constructor(spec = {}, { arms = 2 } = {}) {
+  /**
+   * `armColliders` also makes every arm link a kinematic collider, so
+   * projectiles bounce off the arm and a careless swing can knock a cube -
+   * used by the live task, where the arm is being shot at.
+   */
+  constructor(spec = {}, { arms = 2, armColliders = false } = {}) {
     this.spec = spec;
-    this.world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.81, 0), allowSleep: false });
+    this.armColliders = armColliders;
+    this.projectiles = [];
+    this.shotCount = 0;
+    this.knocks = 0;
+    this.returned = 0;
+    // A live table lets resting bodies sleep: stacked boxes otherwise creep
+    // under solver jitter until a tower walks off its own base. Any contact
+    // with a moving body (a ball, a finger) wakes them.
+    this.world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.81, 0), allowSleep: Boolean(spec.live) });
     this.world.solver.iterations = 20;
     this.world.defaultContactMaterial.friction = 0.6;
     this.world.defaultContactMaterial.restitution = 0.05;
@@ -145,6 +218,17 @@ export class RigidScene {
       }
     }
 
+    // A fence: a low walled pen, so a knocked cube or a ball stays where the
+    // arm can still reach it and every other rule - the workspace edge, the
+    // arm's envelope - still covers it. See fenceWalls() for its shape.
+    for (const wall of fenceWalls(spec.fence)) {
+      const body = new CANNON.Body({ type: CANNON.Body.STATIC, shape: new CANNON.Box(new CANNON.Vec3(wall.size[0] / 2 * MM, wall.size[2] / 2 * MM, wall.size[1] / 2 * MM)) });
+      body.position.copy(toPhysics(wall.center));
+      body.quaternion.setFromEuler(0, -wall.yaw, 0);
+      this.world.addBody(body);
+      this.fixtures.push({ id: 'fence', body, size: wall.size });
+    }
+
     this.objects = (spec.objects || []).map((object) => {
       const size = object.size * MM;
       const shape = object.shape === 'sphere' ? new CANNON.Sphere(size / 2) : new CANNON.Box(new CANNON.Vec3(size / 2, size / 2, size / 2));
@@ -153,8 +237,12 @@ export class RigidScene {
       // it a ball set down with any residual spin rolls off the table.
       body.angularDamping = object.shape === 'sphere' ? 0.4 : 0.1;
       body.linearDamping = 0.05;
+      // Sleep is decided in step() (settleSleepers): cannon's own test adds
+      // spin to speed, and a stack's rotational jitter never passes it. This
+      // limit only sets how fast this body must move to wake one it touches.
+      body.sleepSpeedLimit = 0.01;
       this.world.addBody(body);
-      return { ...object, body };
+      return { ...object, body, stillFrames: 0 };
     });
 
     this.grippers = Array.from({ length: arms }, () => {
@@ -165,16 +253,101 @@ export class RigidScene {
           shape: new CANNON.Box(new CANNON.Vec3(FINGER.length / 2 * MM, FINGER.width / 2 * MM, FINGER.thickness / 2 * MM)),
         });
         body.position.set(0, -10, 0); // parked below the table until an arm drives it
+        body.allowSleep = false; // driven by the arm every frame
+        body.sleepSpeedLimit = 0.001; // any motion wakes what it touches
         this.world.addBody(body);
         return { side, body };
       });
-      return { fingers, closed: false, halfGap: FINGER.openHalfGap, held: null, pose: null };
+      // Link colliders: one slab per arm link, laid along the link each frame.
+      const links = armColliders ? ARM_LINK_LENGTHS.map((length) => {
+        const body = new CANNON.Body({
+          type: CANNON.Body.KINEMATIC,
+          mass: 0,
+          shape: new CANNON.Box(new CANNON.Vec3(LINK_HALF_WIDTH * MM, length / 2 * MM, LINK_HALF_WIDTH * MM)),
+        });
+        body.position.set(0, -10, 0);
+        body.allowSleep = false;
+        body.sleepSpeedLimit = 0.001;
+        this.world.addBody(body);
+        return body;
+      }) : [];
+      return { fingers, links, closed: false, halfGap: FINGER.openHalfGap, held: null, pose: null, chain: null };
     });
     this.reset();
   }
 
+  /**
+   * Fire a ball: `from` and `velocity` in scene units (px, px/s). It is a
+   * dynamic sphere like any object, so it can knock cubes over, bounce off
+   * the arm, and hit a cube in the gripper hard enough to knock it loose.
+   */
+  spawnProjectile(from, velocity, { diameter = PROJECTILE.diameter, mass = PROJECTILE.mass } = {}) {
+    const body = new CANNON.Body({ mass, shape: new CANNON.Sphere(diameter / 2 * MM) });
+    body.position.copy(toPhysics(from));
+    body.velocity.copy(toPhysics(velocity));
+    body.linearDamping = 0.01;
+    body.angularDamping = 0.4;
+    body.sleepSpeedLimit = 0.005; // a ball that touches a sleeping cube wakes it
+    this.world.addBody(body);
+    const projectile = { id: `shot-${this.shotCount += 1}`, shape: 'sphere', size: diameter, mass, body, age: 0 };
+    this.projectiles.push(projectile);
+    // Oldest balls go first so a long session stays cheap to simulate.
+    while (this.projectiles.length > PROJECTILE.maxAlive) this.#removeProjectile(this.projectiles[0]);
+    return projectile.id;
+  }
+
+  #removeProjectile(projectile) {
+    this.world.removeBody(projectile.body);
+    this.projectiles = this.projectiles.filter((entry) => entry !== projectile);
+  }
+
+  /**
+   * Knock a held object loose when a ball hits it (or the fingers holding
+   * it) with more momentum than the grip holds: the grasp is friction in a
+   * real gripper, and a hard enough hit breaks it. The gripper stays closed
+   * on nothing, as a real one would, until its next open command.
+   */
+  #checkGripKnocks(before) {
+    for (const contact of this.world.contacts) {
+      const { bi, bj } = contact;
+      const projectile = this.projectiles.find(({ body }) => body === bi || body === bj);
+      if (!projectile) continue;
+      const other = projectile.body === bi ? bj : bi;
+      this.grippers.forEach((gripper, index) => {
+        if (!gripper.held) return;
+        const heldBody = this.object(gripper.held.id).body;
+        const onGrip = other === heldBody || gripper.fingers.some(({ body }) => body === other);
+        if (!onGrip) return;
+        // The solver has already resolved this contact, so read the hit off
+        // how much the ball's velocity changed over the step.
+        const impulse = projectile.body.velocity.vsub(before.get(projectile)).length() * projectile.mass;
+        if (impulse < PROJECTILE.gripBreakImpulse) return;
+        const { body } = this.object(gripper.held.id);
+        body.type = CANNON.Body.DYNAMIC;
+        body.updateMassProperties();
+        body.allowSleep = true;
+        body.wakeUp();
+        gripper.held = null;
+        gripper.halfGap = FINGER.minHalfGap;
+        this.knocks += 1;
+        this.#lastKnock = index;
+      });
+    }
+  }
+
+  #lastKnock = null;
+
+  /** Gripper index knocked empty since the last call, or null. */
+  takeKnock() {
+    const index = this.#lastKnock;
+    this.#lastKnock = null;
+    return index;
+  }
+
   /** Put every object back at its declared start pose, at rest, and open the jaws. */
   reset() {
+    for (const projectile of [...this.projectiles]) this.#removeProjectile(projectile);
+    this.knocks = 0;
     for (const object of this.objects) {
       const { body } = object;
       body.type = CANNON.Body.DYNAMIC;
@@ -186,6 +359,8 @@ export class RigidScene {
       body.angularVelocity.setZero();
       body.force.setZero();
       body.torque.setZero();
+      body.allowSleep = true;
+      body.wakeUp();
     }
     for (const gripper of this.grippers) {
       gripper.closed = false;
@@ -238,6 +413,10 @@ export class RigidScene {
     }
     const { object, along, side, halfAcross } = best;
     const { body } = object;
+    // Held, the body is driven by the tool: it must be awake and stay awake,
+    // or it would ignore the velocities that carry it and fly off on release.
+    body.wakeUp();
+    body.allowSleep = false;
     body.type = CANNON.Body.KINEMATIC;
     body.velocity.setZero();
     body.angularVelocity.setZero();
@@ -259,6 +438,8 @@ export class RigidScene {
     body.type = CANNON.Body.DYNAMIC;
     body.updateMassProperties();
     body.angularVelocity.setZero();
+    body.allowSleep = true;
+    body.wakeUp();
     gripper.held = null;
   }
 
@@ -280,6 +461,22 @@ export class RigidScene {
       body.velocity.copy(target.vsub(body.position).scale(1 / dt));
       body.quaternion.copy(quaternion.mult(gripper.held.rotation));
     }
+  }
+
+  /** Lay arm `index`'s link colliders along its chain `points` (scene px), with velocity over `dt`. */
+  #placeLinks(index, points, dt, snap = false) {
+    const gripper = this.grippers[index];
+    gripper.links.forEach((body, link) => {
+      const a = toPhysics(points[link]);
+      let b = toPhysics(points[link + 1]);
+      if (link === gripper.links.length - 1) b = a.vadd(b.vsub(a).scale(ARM_LINK_LENGTHS[link] / ARM.lengths[link]));
+      const centre = a.vadd(b).scale(0.5);
+      const axis = b.vsub(a);
+      axis.normalize();
+      body.quaternion.setFromVectors(new CANNON.Vec3(0, 1, 0), axis);
+      if (snap) { body.position.copy(centre); body.velocity.setZero(); return; }
+      body.velocity.copy(centre.vsub(body.position).scale(1 / dt));
+    });
   }
 
   /** Teleport fingers and held objects onto the current tool poses, with zero velocity. */
@@ -307,9 +504,11 @@ export class RigidScene {
     const substeps = Math.max(1, Math.round(dt / PHYSICS_DT));
     const h = dt / substeps;
     const poses = arms.map(({ q, arm }) => toolPose(q, arm));
+    const chains = this.armColliders ? arms.map(({ q, arm }) => forwardKinematics(q, arm).points) : [];
     poses.forEach((pose, index) => {
       const gripper = this.grippers[index];
       if (!gripper.pose) { gripper.pose = pose; this.#snapGrippers(); }
+      if (chains[index] && !gripper.chain) { gripper.chain = chains[index]; this.#placeLinks(index, gripper.chain, 1, true); }
     });
     // Gripper commands act at the start of the frame, at the current pose.
     poses.forEach((_, index) => {
@@ -330,11 +529,73 @@ export class RigidScene {
         // The basis is only used for directions; the end pose's is close
         // enough within one rate-capped frame.
         this.#placeGripper(index, { tip, quaternion, basis: pose.basis }, h);
+        const chain = chains[index];
+        if (chain) {
+          const previous = this.grippers[index].chain;
+          this.#placeLinks(index, previous.map((point, k) => point.map((value, axis) => value + (chain[k][axis] - value) * t)), h);
+        }
       });
+      const before = new Map(this.projectiles.map((projectile) => [projectile, projectile.body.velocity.clone()]));
       this.world.step(h);
+      if (this.projectiles.length && this.grippers.some((gripper) => gripper.held)) this.#checkGripKnocks(before);
     }
-    poses.forEach((pose, index) => { this.grippers[index].pose = pose; });
+    poses.forEach((pose, index) => {
+      this.grippers[index].pose = pose;
+      if (chains[index]) this.grippers[index].chain = chains[index];
+    });
+    if (this.world.allowSleep) this.#settleSleepers();
+    if (this.spec.fence) this.#returnStrays();
+    for (const projectile of [...this.projectiles]) {
+      projectile.age += dt;
+      // Balls that left the table or have come to rest long ago are cleared.
+      if (projectile.body.position.y < -0.2 || projectile.age > PROJECTILE.lifetime) this.#removeProjectile(projectile);
+    }
     this.time += dt;
+  }
+
+  /**
+   * Put an object to sleep once it has been nearly still - under 15 mm/s
+   * and 0.3 rad/s - for 8 control frames. Asleep, a stacked cube stops
+   * creeping under solver jitter; anything that touches it wakes it.
+   */
+  #settleSleepers() {
+    const held = new Set(this.grippers.map((gripper) => gripper.held?.id));
+    for (const object of this.objects) {
+      const { body } = object;
+      if (held.has(object.id) || body.type !== CANNON.Body.DYNAMIC || body.sleepState === CANNON.Body.SLEEPING) { object.stillFrames = 0; continue; }
+      const still = body.velocity.length() < 0.015 && body.angularVelocity.length() < 0.3;
+      object.stillFrames = still ? object.stillFrames + 1 : 0;
+      if (object.stillFrames >= 8) body.sleep();
+    }
+  }
+
+  /**
+   * A cube that ends up outside the fence - knocked out of the gripper high
+   * enough to clear the wall, say - is out of play: once it has come to
+   * rest (or fallen off the table) it goes back to a free supply spot, as an
+   * operator would put it back. Nothing is ever left where the arm is not
+   * allowed or able to go.
+   */
+  #returnStrays() {
+    const held = new Set(this.grippers.map((gripper) => gripper.held?.id));
+    for (const object of this.objects) {
+      const { body } = object;
+      if (held.has(object.id)) continue;
+      const center = toScene(body.position);
+      const offTable = center[2] < -50;
+      if (insideFence(this.spec.fence, center) && !offTable) continue;
+      const settled = body.sleepState === CANNON.Body.SLEEPING || body.velocity.length() < 0.01;
+      if (!settled && !offTable) continue;
+      const free = (spot) => this.objects.every((other) => other === object || Math.hypot(...toScene(other.body.position).slice(0, 2).map((value, axis) => value - spot[axis])) > 40);
+      const spot = [object.position, ...this.objects.map((other) => other.position)].find(free);
+      if (!spot) continue;
+      body.position.copy(toPhysics([...spot, object.size / 2]));
+      body.quaternion.setFromEuler(0, -(object.yaw || 0), 0);
+      body.velocity.setZero();
+      body.angularVelocity.setZero();
+      body.wakeUp();
+      this.returned += 1;
+    }
   }
 
   /** Whether every object is essentially at rest (m/s and rad/s). */
@@ -349,6 +610,13 @@ export class RigidScene {
       objects: this.objects.map(({ id, body }) => ({
         id,
         type: body.type,
+        position: [body.position.x, body.position.y, body.position.z],
+        quaternion: [body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w],
+        velocity: [body.velocity.x, body.velocity.y, body.velocity.z],
+        angularVelocity: [body.angularVelocity.x, body.angularVelocity.y, body.angularVelocity.z],
+      })),
+      projectiles: this.projectiles.map(({ id, size, mass, age, body }) => ({
+        id, size, mass, age,
         position: [body.position.x, body.position.y, body.position.z],
         quaternion: [body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w],
         velocity: [body.velocity.x, body.velocity.y, body.velocity.z],
@@ -376,7 +644,21 @@ export class RigidScene {
       body.quaternion.set(...saved.quaternion);
       body.velocity.set(...saved.velocity);
       body.angularVelocity.set(...saved.angularVelocity);
+      body.allowSleep = saved.type === CANNON.Body.DYNAMIC;
+      body.wakeUp();
     });
+    for (const projectile of [...this.projectiles]) this.#removeProjectile(projectile);
+    for (const saved of snapshot.projectiles || []) {
+      const body = new CANNON.Body({ mass: saved.mass, shape: new CANNON.Sphere(saved.size / 2 * MM) });
+      body.linearDamping = 0.01;
+      body.angularDamping = 0.4;
+      body.position.set(...saved.position);
+      body.quaternion.set(...saved.quaternion);
+      body.velocity.set(...saved.velocity);
+      body.angularVelocity.set(...saved.angularVelocity);
+      this.world.addBody(body);
+      this.projectiles.push({ id: saved.id, shape: 'sphere', size: saved.size, mass: saved.mass, age: saved.age, body });
+    }
     snapshot.grippers.forEach((saved, index) => {
       const gripper = this.grippers[index];
       if (!gripper) return;

@@ -103,6 +103,12 @@
 .rigid-object.held{stroke:#ffbd4a;stroke-width:2}
 .rigid-finger{stroke:#ffbd4a;stroke-width:4;stroke-linecap:round}
 
+.rigid-tower{fill:none;stroke:#c9fb5d;stroke-width:1.5;stroke-dasharray:4 4}
+.rigid-tower.met{stroke:#79c845;stroke-dasharray:none}
+.rigid-fence{fill:#8e9aad;fill-opacity:.55}
+.rigid-projectile{fill:#f4f1ea;stroke:#0e131d;stroke-width:1}
+.live-status{font:10px var(--mono);color:#c9fb5d;letter-spacing:.3px}
+
 /* Policy Run Little Progress Bar */
 .policy-run-container{display:flex;flex-direction:column;align-items:center;gap:5px}
 .policy-progress-wrap{display:flex;align-items:center;gap:6px;width:100%;min-width:150px;opacity:.7;transition:opacity .2s ease}
