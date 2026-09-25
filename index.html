@@ -78,7 +78,7 @@
               <span id="halt-state" class="halt-state idle">Idle · policy not running</span>
               <span id="policy-profile" class="policy-profile">Geometric policy</span>
               <span id="cloth-status" class="cloth-status" hidden>Cloth frames 0 / 120</span><a id="cloth-settings-link" class="cloth-settings-link" href="./cloth.html" target="_blank" rel="noopener" hidden>Cloth settings ↗</a>
-              <label class="policy-budget">Step budget<input id="policy-budget" type="range" min="1" max="500" step="1" value="90" aria-label="Maximum policy control steps" /><output id="policy-budget-value">90</output></label>
+              <label class="policy-budget">Step budget<input id="policy-budget" type="range" min="1" max="600" step="1" value="90" aria-label="Maximum policy control steps" /><output id="policy-budget-value">90</output></label>
               <label class="policy-speed">Speed<input id="policy-speed" type="range" min="0.25" max="8" step="0.25" value="1" aria-label="Policy playback speed" /><output id="policy-speed-value">1.00×</output></label>
               <label class="policy-loop"><input id="policy-loop" type="checkbox" /> Retry until goal</label>
             </div>
@@ -102,10 +102,9 @@
             <div class="tab-content active" id="control">
               <label class="select-label">Task scenario<select id="scenario"></select></label>
               <p class="help" id="scenario-instruction">Drag the amber target in the scene, or adjust the joint targets below.</p>
-              <div id="fold-vertex-picker" class="fold-vertex-picker" hidden>
-                <label class="select-label">Arm A grasps<select id="fold-vertex-a"><option value="corner">True corner</option><option value="inset">One vertex in</option></select></label>
-                <label class="select-label">Arm B grasps<select id="fold-vertex-b"><option value="corner">True corner</option><option value="inset">One vertex in</option></select></label>
-                <p class="help">Preview the fold line above before running. Only these vertices are validated safe for this rig's arm reach - the towel's back corners and swapped grasp roles fail the safety check.</p>
+              <div id="fold-direction-picker" class="fold-vertex-picker" hidden>
+                <label class="select-label">Fold<select id="fold-direction"><option value="back-to-front">Back edge onto front edge</option><option value="front-to-back">Front edge onto back edge</option></select></label>
+                <p class="help">A half fold: both arms carry the corners of one edge and lay each on the corner opposite, so the towel's four corners end as two. The arrows above preview it before a run.</p>
               </div>
               <div id="arm-switch" class="arm-switch" role="group" aria-label="Arm under manual control" hidden></div>
               <div id="sliders" class="sliders"></div>

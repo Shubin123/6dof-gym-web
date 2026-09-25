@@ -338,7 +338,7 @@ export function makeCloth() {
   group.position.copy(toWorld([325, 240, 0]));
   group.add(mesh, grid);
   group.visible = false;
-  const cloth = { group, geometry, simulator, taskId: null };
+  const cloth = { group, geometry, simulator, taskId: null, foldTarget };
   syncClothGeometry(cloth);
   return cloth;
 }
@@ -563,7 +563,11 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
   }
 
   function layoutCloth() {
-    cloth.group.visible = current.taskId === 'fold';
+    // Task 7 and Task 12 both fold the towel; Task 12's sits on the cell
+    // midline instead, and has no fixed left-half target footprint.
+    cloth.group.visible = current.taskId === 'fold' || current.taskId === 'fold_custom';
+    cloth.foldTarget.visible = current.taskId === 'fold';
+    if (current.clothOrigin) cloth.group.position.copy(toWorld([...current.clothOrigin, 0]));
     foldGuide.group.visible = cloth.group.visible && Boolean(current.foldGuide);
     if (foldGuide.group.visible) {
       const { stage, cornerB, pinA } = current.foldGuide;
@@ -631,7 +635,7 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     const motionLine = motionLines[rig.arm.id === 'B' ? 1 : 0];
     motionLine.geometry.setFromPoints(curve.getPoints(32));
     motionLine.computeLineDistances();
-    motionLine.visible = current.taskId !== 'fold' && !current.rigid;
+    motionLine.visible = rig.goal.group.visible;
   }
 
   function layout() {
@@ -641,7 +645,7 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
       rig.group.visible = visible;
       // The fold plan does not chase goal cubes; the fold guide replaces them.
       // Neither do the rigid tasks, whose goal is where the object ends up.
-      const showGoal = visible && current.taskId !== 'fold' && !current.rigid;
+      const showGoal = visible && current.taskId !== 'fold' && current.taskId !== 'fold_custom' && !current.rigid;
       rig.goal.group.visible = showGoal;
       motionLines[index].visible = showGoal;
       if (visible) layoutArm(rig, armState);

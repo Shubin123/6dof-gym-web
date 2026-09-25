@@ -1,6 +1,6 @@
 # Testing guide
 
-ArmLab's logic layer (`src/core.js`, `src/cloth.js`, `src/rigid.js`, `src/rigid-plan.js`, `src/rigid-tasks.js`, `src/task-policies.js`) is plain, DOM-free JavaScript on purpose, so it runs directly under Node's built-in test runner with no browser, bundler, or mocking framework. The UI layer (`src/main.js`, `src/viewport3d.js`) wires that logic to the DOM and to three.js and is verified by hand in a real browser instead, as described below.
+ArmLab's logic layer (`src/core.js`, `src/cloth.js`, `src/half-fold.js`, `src/arm-track.js`, `src/rigid.js`, `src/rigid-plan.js`, `src/rigid-tasks.js`, `src/task-policies.js`) is plain, DOM-free JavaScript on purpose, so it runs directly under Node's built-in test runner with no browser, bundler, or mocking framework. The UI layer (`src/main.js`, `src/viewport3d.js`) wires that logic to the DOM and to three.js and is verified by hand in a real browser instead, as described below.
 
 ## Running the suite
 
@@ -30,6 +30,7 @@ As of this writing the suite is 46 tests across 8 files, all passing, with line 
 | `test/regression.test.js` | Contract-level edge cases the integration tests above only exercise incidentally: `reduceSafeCellMotion`'s `keepTailFrames`/`requiredFrameIndexes` options and its empty-input result, `policyRecipeFor`'s fallback for an unknown task, and `scoreTaskStages`'s neutral-default and fully-solved boundary cases. Added to close the coverage gaps a plain `npm run test:coverage` pass turns up after a change to `core.js` or `task-policies.js`. |
 | `test/dataset-export.test.js` | `buildDatasetManifest`: the empty-input and mixed-arm-count rejections, and that a multi-episode bundle gets correct feature shapes, deduplicated task indices, contiguous global frame indexing, and `next.done`/`next.success` flags. `scripts/lerobot_export.py` (Python, outside `npm test`) is verified by hand against a real downloaded bundle - see its own docstring. |
 | `test/rigid.test.js` | The rigid-object tasks (13-15): objects rest and fall under gravity, tool-down IK points the tool straight down with horizontal jaws, each task's planned pick and place succeeds in the cannon-es simulation with every frame rate-capped and cell-safe, a stale plan closes on air (the grasp is contact-gated, not a magnet), a held cube cannot be lowered through another, and snapshot/restore mid-carry finishes the task identically. |
+| `test/half-fold.test.js` | Task 12's half fold in both directions (back edge onto front, front onto back): a plan exists from home, every two-arm frame is cell-safe and rate-capped, both grippers close together and both let go, and after the cloth settles each carried corner lies within 1.5 cm of, and on top of, the corner it was laid on - four corners into two. Also that a flat towel is not scored as folded. |
 
 ## Adding a regression test
 

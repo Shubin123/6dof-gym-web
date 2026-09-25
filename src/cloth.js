@@ -332,14 +332,23 @@ export class ClothSimulator {
    * clothCorners()), or a vertex near one, rather than the fixed
    * front-left/front-right pair every other caller uses. Does not touch
    * physics state; call reset() too if a grasp is already in progress.
+   *
+   * By default one arm pins and the other carries (Task 7), so the fold
+   * axis is the one the pair differs along. A half fold where both arms
+   * carry a corner of the same edge (Task 12) passes `foldAxis` explicitly,
+   * since that pair shares a row, and `pinOnRelease: false` so a corner laid
+   * down by Arm A rests on friction like Arm B's instead of being held.
    */
-  setAnchors(anchorA, anchorB) {
+  setAnchors(anchorA, anchorB, { foldAxis, pinOnRelease = true, partners = null } = {}) {
     for (const idx of [...this.anchorsA, ...this.anchorsB]) this.graspable[idx] = 0;
     this.anchorsA = [anchorA];
     this.anchorsB = [anchorB];
     for (const idx of [anchorA, anchorB]) this.graspable[idx] = 1;
     const rowOf = (idx) => Math.floor(idx / (this.columns + 1));
-    this.foldAxis = rowOf(anchorA) === rowOf(anchorB) ? 'columns' : 'rows';
+    this.foldAxis = foldAxis ?? (rowOf(anchorA) === rowOf(anchorB) ? 'columns' : 'rows');
+    this.pinOnRelease = pinOnRelease;
+    // For a half fold, the corner each carried anchor is laid on.
+    this.foldPartners = partners;
   }
 
   /** Nearest free graspable point within graspRadius of `target`, or -1. */
@@ -387,7 +396,7 @@ export class ClothSimulator {
   _release(m) {
     this.captured[m] = false;
     this.released[m] = true;
-    if (m !== 0) return;
+    if (m !== 0 || this.pinOnRelease === false) return;
     const idx = this._heldPoint(0);
     if (idx < 0) return;
     this.tablePinA = { x: this.positions[idx * 3], y: this.positions[idx * 3 + 1], z: this.tableZ };
@@ -585,7 +594,10 @@ export class ClothSimulator {
    */
   _solveLayerSeparation() {
     const p = this.positions;
+    const stride = this.columns + 1;
     const maxStep = 0.008 / Math.sqrt(this.substeps);
+    const resting = this._layerContact ??= new Uint8Array(this.numVertices);
+    resting.fill(0);
     const lift = (i1, i2) => {
       if (this.invMass[i2] === 0) return;
       const o1 = i1 * 3;
@@ -596,6 +608,27 @@ export class ClothSimulator {
         p[o2 + 2] += Math.min(minZ - p[o2 + 2], maxStep);
         if (this.forces[o2 + 2] < 0) this.forces[o2 + 2] = 0;
       }
+      if (p[o2 + 2] <= minZ + 1e-4) resting[i2] = 1;
+    };
+    // Cloth-on-cloth friction, the same Coulomb model as the table's: a
+    // point resting on the layer below keeps its place unless the springs
+    // pull it harder than its weight's friction allows. Without it a folded
+    // layer slides freely on the one under it and a released corner springs
+    // back toward where it came from.
+    const frictionPass = () => {
+      const normal = Math.abs(this.gravity) / (this.substeps * this.substeps);
+      const f = this.forces;
+      for (let i = 0; i < this.numVertices; i += 1) {
+        if (!resting[i]) continue;
+        const o = i * 3;
+        const lateral = Math.hypot(f[o], f[o + 1]);
+        if (lateral < 1e-12) continue;
+        const keep = lateral <= this.staticFriction * normal ? 0 : 1 - (this.kineticFriction * normal) / lateral;
+        p[o] -= f[o] * (1 - keep);
+        p[o + 1] -= f[o + 1] * (1 - keep);
+        f[o] *= keep;
+        f[o + 1] *= keep;
+      }
     };
     // Whichever axis the pinned pair (anchorsA/anchorsB) differ along is the
     // fold axis: a right-half point (index > half along that axis) folding
@@ -604,21 +637,34 @@ export class ClothSimulator {
     // neighbours in the weave, not stacked layers, and are skipped - at rest
     // they are closer than the overlap radius and would otherwise lift the
     // flat towel's midline.
+    //
+    // The half that goes on top is the one Arm B's corner is on: B carries
+    // in every fold (Task 7's right half, or Task 12's back or front half).
     if (this.foldAxis === 'rows') {
       const halfRow = this.rows / 2;
+      const highOnTop = Math.floor(this.anchorsB[0] / stride) > halfRow;
       for (let c = 0; c <= this.columns; c += 1) {
         for (let r2 = this.rows; r2 > halfRow; r2 -= 1) {
-          for (let r1 = 0; r1 <= halfRow && r1 < r2 - 2; r1 += 1) lift(r1 * (this.columns + 1) + c, r2 * (this.columns + 1) + c);
+          for (let r1 = 0; r1 <= halfRow && r1 < r2 - 2; r1 += 1) {
+            if (highOnTop) lift(r1 * stride + c, r2 * stride + c);
+            else lift(r2 * stride + c, r1 * stride + c);
+          }
         }
       }
+      frictionPass();
       return;
     }
     const halfCol = this.columns / 2;
+    const highOnTop = this.anchorsB[0] % stride > halfCol;
     for (let r = 0; r <= this.rows; r += 1) {
       for (let c2 = this.columns; c2 > halfCol; c2 -= 1) {
-        for (let c1 = 0; c1 <= halfCol && c1 < c2 - 2; c1 += 1) lift(r * (this.columns + 1) + c1, r * (this.columns + 1) + c2);
+        for (let c1 = 0; c1 <= halfCol && c1 < c2 - 2; c1 += 1) {
+          if (highOnTop) lift(r * stride + c1, r * stride + c2);
+          else lift(r * stride + c2, r * stride + c1);
+        }
       }
     }
+    frictionPass();
   }
 
   /** Rolling history & settling detection. */
@@ -692,6 +738,25 @@ export class ClothSimulator {
     return sumDist / pairs;
   }
 
+  /**
+   * Half-fold score: `pairs` is [[carried, partner], ...] - each carried
+   * corner and the corner it should be laid on. "Four corners into two"
+   * means every such pair coincides on the table, and the whole folded edge
+   * lies on the edge opposite (getFoldAlignment across the fold axis).
+   */
+  getHalfFoldMetrics(pairs = [[this.anchorsA[0], this.foldPartners?.[0]], [this.anchorsB[0], this.foldPartners?.[1]]]) {
+    const p = this.positions;
+    const cornerGaps = pairs.map(([a, b]) => Math.hypot(p[a * 3] - p[b * 3], p[a * 3 + 1] - p[b * 3 + 1]));
+    const edgeGap = this.getFoldAlignment();
+    return {
+      cornerGaps,
+      edgeGap,
+      folded: cornerGaps.every((gap) => gap < 0.15) && edgeGap < 0.2,
+      stretchError: this.getMaxStretchError(),
+      settled: this.settled,
+    };
+  }
+
   /** Distance between the two held corners (where the grippers hold). */
   getFrontFoldDistance() {
     const a = this.anchorsA[0] * 3;
@@ -746,11 +811,37 @@ export class ClothSimulator {
     for (let c = this.columns - 1; c >= 0; c -= 1) basePoints.push(toScene(this.rows * stride + c));
     for (let r = this.rows - 1; r >= 1; r -= 1) basePoints.push(toScene(r * stride));
 
-    // Fold crease line (along midline c = columns / 2)
-    const midC = Math.round(this.columns / 2);
+    // Fold crease line, across the middle of whichever axis is being folded:
+    // the column midline for a left/right fold, the row midline for front/back.
     const creasePoints = [];
-    for (let r = 0; r <= this.rows; r += 1) creasePoints.push(toScene(r * stride + midC));
+    if (this.foldAxis === 'rows') {
+      const midR = Math.round(this.rows / 2);
+      for (let c = 0; c <= this.columns; c += 1) creasePoints.push(toScene(midR * stride + c));
+    } else {
+      const midC = Math.round(this.columns / 2);
+      for (let r = 0; r <= this.rows; r += 1) creasePoints.push(toScene(r * stride + midC));
+    }
 
-    return { basePoints, creasePoints };
+    // Every grid cell as a quad, split by which way it faces: a folded-over
+    // layer's cells are mirrored, so their winding flips. Drawn as one
+    // outline, a folded towel doubles back on itself and its fill cancels;
+    // drawn per facing, each layer fills, and the flipped layer is on top.
+    const faceUp = [];
+    const faceDown = [];
+    for (let r = 0; r < this.rows; r += 1) {
+      for (let c = 0; c < this.columns; c += 1) {
+        const i = r * stride + c;
+        const quad = [toScene(i), toScene(i + 1), toScene(i + stride + 1), toScene(i + stride)];
+        let area = 0;
+        for (let k = 0; k < 4; k += 1) {
+          const [x1, y1] = quad[k];
+          const [x2, y2] = quad[(k + 1) % 4];
+          area += x1 * y2 - x2 * y1;
+        }
+        (area >= 0 ? faceUp : faceDown).push(quad);
+      }
+    }
+
+    return { basePoints, creasePoints, faceUp, faceDown };
   }
 }

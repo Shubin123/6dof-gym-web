@@ -1,6 +1,7 @@
 import './styles.css';
 import compiled from '../data/compiled.json';
 import registry from '../data/sources.json';
+import { planHalfFoldMotion } from './half-fold.js';
 import { ARM, ARM_B, buildDatasetManifest, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, reduceSafeCellMotion, solveInverseKinematics } from './core.js';
 import { ClothSimulator, clothCorners } from './cloth.js';
 import { loadClothSettings, onClothSettingsChange } from './cloth-settings.js';
@@ -17,9 +18,10 @@ const jointLimitOf = (index) => (index === 0 ? ARM.yawLimit : ARM.jointLimit);
 const ARMS = [ARM, ARM_B];
 // Ceiling for the Step budget slider and the fold task's default budget.
 // Raised from the old flat 400 because the fold plan's own settle tail (see
-// core.js's planTowelFoldMotion) needs ~477 steps to finish; keep this in
-// sync with index.html's #policy-budget max attribute.
-const FOLD_STEP_BUDGET = 500;
+// core.js's planTowelFoldMotion) needs ~477 steps to finish, then to 600 for
+// Task 12's half fold (half-fold.js), which runs to ~550; keep this in sync
+// with index.html's #policy-budget max attribute.
+const FOLD_STEP_BUDGET = 600;
 
 const makeArmState = (arm) => ({
   arm,
@@ -53,12 +55,9 @@ const state = {
   // Physics values come from the cloth settings page (cloth.html).
   cloth2d: new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2, ...loadClothSettings() }),
   timeline: { currentStep: 0, totalSteps: 0, scrubbing: false },
-  // Task 12 (Configurable fold): which vertex each arm grasps. 'corner' is
-  // Task 7's exact pair; 'inset' moves one vertex in. That one-vertex step is
-  // the whole validated-safe range - planCartesianMotion's arm-clearance and
-  // workspace-boundary checks reject every other corner pair and every
-  // swapped-role pair this rig's two fixed-base arms were tried against.
-  foldVertex: { A: 'corner', B: 'corner' },
+  // Task 12 (Configurable fold): which edge the half fold lays over the
+  // other. Either way both arms carry a corner, so four corners become two.
+  foldDirection: 'back-to-front',
   // Tasks 13-15 (Rigid objects): the physics scene and the spec it was built
   // from - a copy of the task's `rigid` block, so a scene click can move the
   // place target without editing the task itself.
@@ -105,25 +104,34 @@ function moveRigidGoal([x, y]) {
 const controlledArm = () => state.arms[state.activeArm];
 const isClothFoldTask = (workflow) => workflow.id === 'fold' || workflow.id === 'fold_custom';
 
-/** Point index of the vertex `side`'s current selection grasps. */
-function foldVertexIndex(side) {
-  const { columns, rows } = state.cloth2d;
-  const corners = clothCorners(columns, rows);
-  const inset = state.foldVertex[side] === 'inset';
-  return side === 'A' ? corners.frontLeft + (inset ? 1 : 0) : corners.frontRight - (inset ? 1 : 0);
+/**
+ * Towel centre in scene pixels. Task 7 keeps its validated spot; Task 12's
+ * towel sits on the cell midline, halfway between the two bases, because a
+ * half fold needs each arm to reach both corners on its side - at Task 7's
+ * spot the back-left corner is 67 px from Arm A's column, too close to lift.
+ */
+const clothOrigin = (workflow = state.currentWorkflow) => (workflow.id === 'fold_custom' ? [380, 240] : [325, 240]);
+
+/** Task 12's corners: the two each arm carries, and the two they are laid on. */
+function halfFoldCorners() {
+  const corners = clothCorners(state.cloth2d.columns, state.cloth2d.rows);
+  const back = [corners.backLeft, corners.backRight];
+  const front = [corners.frontLeft, corners.frontRight];
+  return state.foldDirection === 'back-to-front' ? { carried: back, partners: front } : { carried: front, partners: back };
 }
 
-/** Rest-pose scene position of a fold vertex, for the pre-run preview line. */
-function foldVertexScenePoint(side) {
-  const idx = foldVertexIndex(side);
+/** Rest-pose scene position of cloth point `idx`, for the pre-run preview and the planner. */
+function clothRestScenePoint(idx) {
+  const [ox, oy] = clothOrigin();
   const p = state.cloth2d.restPositions;
-  return [325 + p[idx * 3] * 100, 240 + p[idx * 3 + 1] * 100];
+  return [ox + p[idx * 3] * 100, oy + p[idx * 3 + 1] * 100];
 }
 
-/** Apply the current vertex selection to the shared cloth simulator. */
-function applyFoldVertexSelection() {
+/** Apply the current fold direction to the shared cloth simulator. */
+function applyHalfFoldSelection() {
   if (state.currentWorkflow.id !== 'fold_custom') return;
-  state.cloth2d.setAnchors(foldVertexIndex('A'), foldVertexIndex('B'));
+  const { carried, partners } = halfFoldCorners();
+  state.cloth2d.setAnchors(carried[0], carried[1], { foldAxis: 'rows', pinOnRelease: false, partners });
 }
 
 const sliders = $('#sliders');
@@ -433,8 +441,8 @@ function updateCloth2D() {
   setHidden($('#goals'), isFold || Boolean(state.rigid));
   if (!isFold) return;
 
-  const { basePoints, creasePoints } = state.cloth2d.get2DPolygons([325, 240], 100);
-  const pathString = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0], 1)} ${fmt(p[1], 1)}`).join(' ') + ' Z';
+  const { creasePoints, faceUp, faceDown } = state.cloth2d.get2DPolygons(clothOrigin(), 100);
+  const cells = (quads) => quads.map((quad) => `${quad.map((pt, i) => `${i ? 'L' : 'M'}${fmt(pt[0], 1)} ${fmt(pt[1], 1)}`).join(' ')} Z`).join(' ');
   const creaseString = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0], 1)} ${fmt(p[1], 1)}`).join(' ');
   const isCustom = state.currentWorkflow.id === 'fold_custom';
 
@@ -442,7 +450,8 @@ function updateCloth2D() {
     ${isCustom ? '' : `
     <rect class="cloth-2d-target" x="250" y="180" width="75" height="120" rx="3" />
     <text class="cloth-2d-target-label" x="287.5" y="318" text-anchor="middle">FOLDED TARGET</text>`}
-    <path class="cloth-2d-base" d="${pathString(basePoints)}" />
+    <path class="cloth-2d-base" d="${cells(faceUp)}" />
+    ${faceDown.length ? `<path class="cloth-2d-base cloth-2d-flipped" d="${cells(faceDown)}" />` : ''}
     <path class="cloth-2d-crease" d="${creaseString(creasePoints)}" />
     ${isCustom ? configurableFoldGuideSvg() : foldGuideSvg()}
   `;
@@ -503,27 +512,38 @@ function updateRigid2D() {
 }
 
 /**
- * Task 12 guide: unlike Task 7's (which reads live cloth state to show
- * captured/pinned progress), this previews the *selected* grasp vertices and
- * fold direction so the operator can see the outcome before running - the
- * whole point of the task - then keeps showing it as a reference during the
- * run alongside the live cloth mesh above.
+ * Task 12 guide: the fold line across the towel, and an arrow from each
+ * corner an arm carries to the corner it is laid on - drawn from the rest
+ * pose, so it previews the selected fold before a run and stays as the
+ * reference during one. Each carried corner's ring fills while held.
  */
 function configurableFoldGuideSvg() {
-  const [ax, ay] = foldVertexScenePoint('A');
-  const [bx, by] = foldVertexScenePoint('B');
-  const midX = (ax + bx) / 2;
   const cloth = state.cloth2d;
-  const mark = (x, y, arm, held) => `
-    <g class="fold-mark ${held ? 'held' : 'pending'}" data-arm="${arm}">
-      <circle cx="${fmt(x, 1)}" cy="${fmt(y, 1)}" r="9" />
+  const { carried, partners } = halfFoldCorners();
+  const [ox, oy] = clothOrigin();
+  const halfWidth = (cloth.width / 2) * 100;
+  const { cornerGaps, folded } = cloth.getHalfFoldMetrics();
+  const released = cloth.wasCaptured[0] && cloth.wasCaptured[1] && !cloth.captured[0] && !cloth.captured[1];
+  const arrows = carried.map((idx, arm) => {
+    const [fx, fy] = clothRestScenePoint(idx);
+    const [tx, ty] = clothRestScenePoint(partners[arm]);
+    // Bow each arrow outward, away from the other arm, so both stay readable.
+    const bow = (arm === 0 ? -1 : 1) * 28;
+    return `
+    <path class="fold-arrow" d="M${fmt(fx, 1)} ${fmt(fy, 1)} Q${fmt(fx + bow, 1)} ${fmt((fy + ty) / 2, 1)} ${fmt(tx, 1)} ${fmt(ty, 1)}" marker-end="url(#fold-arrowhead)" />
+    <g class="fold-mark ${cloth.captured[arm] || cloth.wasCaptured[arm] ? 'held' : 'pending'}" data-arm="${arm ? 'B' : 'A'}">
+      <circle cx="${fmt(fx, 1)}" cy="${fmt(fy, 1)}" r="9" />
     </g>`;
+  }).join('');
+  const direction = state.foldDirection === 'back-to-front' ? 'Back edge onto front edge' : 'Front edge onto back edge';
+  const status = released
+    ? (folded ? `Folded · 4 corners → 2 (${cornerGaps.map((gap) => `${fmt(gap * 10, 1)} cm`).join(' / ')} apart)` : `Placed · corners ${cornerGaps.map((gap) => `${fmt(gap * 10, 1)} cm`).join(' / ')} from their partners`)
+    : `${direction} · 4 corners → 2`;
   return `
     <defs><marker id="fold-arrowhead" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="fold-arrowhead" /></marker></defs>
-    <path class="fold-arrow" d="M${fmt(bx, 1)} ${fmt(by, 1)} Q${fmt(midX, 1)} ${fmt(ay - 40, 1)} ${fmt(ax, 1)} ${fmt(ay, 1)}" marker-end="url(#fold-arrowhead)" />
-    ${mark(ax, ay, 'A', cloth.captured[0] || cloth.tablePinA)}
-    ${mark(bx, by, 'B', cloth.captured[1])}
-    <text class="fold-stage" x="96" y="112">Pin A: ${state.foldVertex.A} vertex · Fold B onto it: ${state.foldVertex.B} vertex</text>`;
+    <line class="fold-line" x1="${fmt(ox - halfWidth - 6, 1)}" y1="${oy}" x2="${fmt(ox + halfWidth + 6, 1)}" y2="${oy}" />
+    ${arrows}
+    <text class="fold-stage" x="96" y="112">${status}</text>`;
 }
 
 /** Task 7 guide: fold line, each arm's corner, and where B's corner goes next. */
@@ -570,7 +590,8 @@ function advanceClothPhysics() {
   if (!isClothFoldTask(state.currentWorkflow)) return;
   const targets = activeArms().map((armState) => {
     const tip = tipOf(armState);
-    return { x: (tip[0] - 325) / 100, y: (tip[1] - 240) / 100, z: tip[2] / 100 };
+    const [ox, oy] = clothOrigin();
+    return { x: (tip[0] - ox) / 100, y: (tip[1] - oy) / 100, z: tip[2] / 100 };
   });
   // The fold plan says when each gripper closes and opens; a manually driven
   // arm has no such command and grasps by proximity instead.
@@ -583,7 +604,12 @@ function advanceClothPhysics() {
   const metrics = state.cloth2d.getFoldMetrics();
   state.policy.stageScore = scoreTaskStages(state.currentWorkflow, { cloth: state.cloth2d, tips: activeArms().map(tipOf) });
   const held = state.cloth2d.captured.map((value, index) => `${index ? 'B' : 'A'} ${value ? 'held' : 'free'}`).join(' · ');
-  $('#cloth-status').textContent = `Cloth frames ${state.cloth2d.history.length} / 120 · ${held} · ${state.policy.stageScore.stage} ${Math.round(state.policy.stageScore.reward * 100)}% · fold: ${fmt(metrics.frontDistance * 10, 1)} cm${metrics.folded ? ' · folded' : ''}`;
+  const score = state.policy.stageScore;
+  // A half fold is measured corner-to-partner; Task 7 by its two held corners.
+  const fold = score.metrics
+    ? `corners ${score.metrics.cornerGaps.map((gap) => fmt(gap * 10, 1)).join(' / ')} cm${score.complete ? ' · folded' : ''}`
+    : `${fmt(metrics.frontDistance * 10, 1)} cm${metrics.folded ? ' · folded' : ''}`;
+  $('#cloth-status').textContent = `Cloth frames ${state.cloth2d.history.length} / 120 · ${held} · ${score.stage} ${Math.round(score.reward * 100)}% · fold: ${fold}`;
 }
 
 function updateTimelineSlider() {
@@ -745,6 +771,7 @@ function pushViewportState() {
     taskId: state.currentWorkflow.id,
     policyProgress: state.policy.path?.length ? state.policy.pathIndex / state.policy.path.length : 0,
     clothSnapshot: state.cloth2d.snapshot(),
+    clothOrigin: clothOrigin(),
     foldGuide: state.currentWorkflow.id === 'fold' ? {
       stage: foldGuideStage(state.cloth2d),
       cornerB: clothPointToScene(state.cloth2d, state.cloth2d.anchorsB[0]),
@@ -1119,13 +1146,13 @@ function loadWorkflow(id, { scroll = false } = {}) {
   $('#policy-profile').textContent = policyRecipeFor(workflow).label;
   setHidden($('#cloth-status'), !isClothFoldTask(workflow));
   setHidden($('#cloth-settings-link'), !isClothFoldTask(workflow));
-  setHidden($('#fold-vertex-picker'), workflow.id !== 'fold_custom');
+  setHidden($('#fold-direction-picker'), workflow.id !== 'fold_custom');
   $('#cloth-status').textContent = 'Cloth frames 0 / 120';
   // Task 7 always grasps the true corners; only the configurable task varies
   // it, and its own selection re-applies below.
   if (workflow.id !== 'fold_custom') state.cloth2d?.setAnchors(0, state.cloth2d.columns);
   state.cloth2d?.reset();
-  applyFoldVertexSelection();
+  applyHalfFoldSelection();
   viewport.instance?.resetCloth?.();
   state.rigidSpec = isRigidTask(workflow) ? structuredClone(workflow.rigid) : null;
   buildRigidScene();
@@ -1296,14 +1323,14 @@ async function runPolicyPlanning(token) {
     await yieldForSolverFeedback();
     if (!isCurrent()) return;
     const warmStart = bootstrapPolicy(state.currentWorkflow);
-    const profile = state.currentWorkflow.id === 'fold_custom'
-      ? { ...warmStart.profile, cornerA: foldVertexScenePoint('A'), cornerB: foldVertexScenePoint('B') }
-      : warmStart.profile;
-    motion = planTowelFoldMotion(
-      poses,
-      compiled.environment.safety,
-      profile,
-    );
+    if (state.currentWorkflow.id === 'fold_custom') {
+      // Half fold: each arm carries its side's corner onto the one opposite.
+      const { carried, partners } = halfFoldCorners();
+      const carry = carried.map((idx, arm) => [clothRestScenePoint(idx), clothRestScenePoint(partners[arm])]);
+      motion = planHalfFoldMotion(poses, compiled.environment.safety, { ...warmStart.profile, carry });
+    } else {
+      motion = planTowelFoldMotion(poses, compiled.environment.safety, warmStart.profile);
+    }
   }
   if (state.rigid) {
     state.policy.planningPhase = 'planning top-down grasp';
@@ -1507,14 +1534,12 @@ function installListeners() {
   $('#view-2d').addEventListener('click', () => setViewportMode('2d'));
   $('#view-3d').addEventListener('click', () => setViewportMode('3d'));
   $('#scenario').addEventListener('change', (event) => loadWorkflow(event.target.value));
-  const onFoldVertexChange = (side) => (event) => {
-    state.foldVertex[side] = event.target.value;
-    applyFoldVertexSelection();
+  $('#fold-direction').addEventListener('change', (event) => {
+    state.foldDirection = event.target.value;
+    applyHalfFoldSelection();
     haltPolicy(HALT.IDLE, { silent: true });
     resetArms();
-  };
-  $('#fold-vertex-a').addEventListener('change', onFoldVertexChange('A'));
-  $('#fold-vertex-b').addEventListener('change', onFoldVertexChange('B'));
+  });
   $('#arm-switch').addEventListener('click', (event) => {
     const index = event.target.dataset.armIndex;
     if (index === undefined) return;

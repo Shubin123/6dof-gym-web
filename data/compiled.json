@@ -478,30 +478,29 @@
       "family": "laundry",
       "difficulty": 4,
       "horizon_steps": 200,
-      "instruction": "Choose which corner each gripper grasps, preview the fold line, then fold.",
+      "instruction": "Choose which edge to fold, preview it, then fold the towel in half so its four corners become two.",
       "goal": [
-        250,
+        305,
         180
       ],
       "goal_b": [
-        400,
+        455,
         180
       ],
       "object": "towel",
-      "metric": "fold alignment tolerance",
-      "summary": "Task 07's fold with the grasp point exposed as a setting instead of fixed: each arm grasps either its true front corner or one vertex in from it, and a preview line shows the resulting fold direction before the policy runs. The safe range is narrow - the arm reach that makes Task 07's pair comfortable does not extend to the towel's back corners or to swapped roles, both of which fail the same safety check a live run would.",
-      "success": "Folded edge within 3 cm of the pinned edge, no snagging, and the towel still flat under the holding gripper, for whichever grasp vertices were selected.",
+      "metric": "both corners on their partners",
+      "summary": "A true half fold. Task 07 pins one corner and carries the other, so only one corner moves and the rest of that edge trails. Here both arms carry the two corners of one edge together, each along an arc over the fold line, and lay each on the corner opposite, so the towel's four corners end as two stacked pairs. The towel sits on the cell midline, halfway between the arm bases, which is what puts both corners on each arm's side within reach.",
+      "success": "Both carried corners released within 1.5 cm of the corners they were laid on, the folded edge within 2 cm of the edge under it, and the towel not overstretched.",
       "sensors": "Overhead RGB + a wrist camera per arm. Depth helps enormously in finding a liftable edge.",
       "curriculum": [
-        "True-corner grasp on both sides (Task 07's exact case)",
-        "One vertex inset on the carried side only",
-        "One vertex inset on the pinned side only",
-        "Inset on both sides",
-        "Preview the fold line before committing to a run"
+        "Back edge onto front edge",
+        "Front edge onto back edge",
+        "Preview the fold before committing to a run",
+        "Scrub the timeline to watch the top layer stay put once released"
       ],
       "failure_modes": [
-        "A requested grasp vertex the arm cannot safely reach is rejected before any motion, not discovered mid-fold",
-        "Gripper closes on two layers and the fold tears the stack apart"
+        "A released layer with nothing holding it slides back toward where it came from - here cloth-on-cloth friction keeps it",
+        "Arms planned one at a time can meet over the middle of the towel; each carries in its own lane of the table"
       ],
       "guardrail": "Keep the arm outside any appliance. Never automate a door, drum, or heat source without dedicated safety hardware.",
       "baseline": "Diffusion Policy",
