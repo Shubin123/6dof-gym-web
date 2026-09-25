@@ -107,7 +107,7 @@
 .rigid-tower.met{stroke:#79c845;stroke-dasharray:none}
 .rigid-fence{fill:#8e9aad;fill-opacity:.55}
 .rigid-projectile{fill:#f4f1ea;stroke:#0e131d;stroke-width:1}
-.live-status{font:10px var(--mono);color:#59616d;letter-spacing:.3px}
+#control .live-status{font:10px var(--mono);color:#3b4350;letter-spacing:.3px}
 
 /* Policy Run Little Progress Bar */
 .policy-run-container{display:flex;flex-direction:column;align-items:center;gap:5px}
