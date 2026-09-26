@@ -105,6 +105,15 @@
 
 .rigid-tower{fill:none;stroke:#c9fb5d;stroke-width:1.5;stroke-dasharray:4 4}
 .rigid-tower.met{stroke:#79c845;stroke-dasharray:none}
+.podium-marker{cursor:pointer}
+.podium-guide-ring{stroke:#49c7e8;opacity:0.75;transition:stroke .2s ease}
+.podium-marker.met .podium-guide-ring{stroke:#79c845;stroke-dasharray:none}
+.podium-cross{stroke:#49c7e8;stroke-width:1.5;opacity:0.6}
+.podium-marker.met .podium-cross{stroke:#79c845}
+.propagate-hint{fill:#ffbd4a;font:8.5px var(--mono);letter-spacing:.4px}
+.sibling-6dof-arm{pointer-events:none}
+.sibling-links{stroke:#69d2df;filter:drop-shadow(0 2px 4px rgba(0,0,0,.45))}
+.sibling-status-label{font:10.5px var(--mono);font-weight:700;letter-spacing:.5px}
 .rigid-fence{fill:#8e9aad;fill-opacity:.55}
 .rigid-projectile{fill:#f4f1ea;stroke:#0e131d;stroke-width:1}
 #control .live-status{font:10px var(--mono);color:#3b4350;letter-spacing:.3px}

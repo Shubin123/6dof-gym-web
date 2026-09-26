@@ -8,6 +8,7 @@
  * a checkpoint loader while retaining the same safety-gated interface.
  */
 import { scoreShirtFold } from './shirt-fold.js';
+import { scoreAutoPropagateStages } from './auto-propagate.js';
 
 export const TASK_POLICY_RECIPES = Object.freeze({
   default: Object.freeze({
@@ -57,6 +58,20 @@ export const TASK_POLICY_RECIPES = Object.freeze({
       Object.freeze({ id: 'settle', label: 'settle folded garment', weight: 0.10 }),
     ]),
   }),
+  // Task 18's auto-propagate: sequential modular assembly of base pedestal,
+  // articulated linkage, and end-effector gripper into a secondary robotic arm.
+  auto_propagate: Object.freeze({
+    label: '6-DOF Sibling Arm Installation Policy',
+    kind: 'rigid-assembly',
+    training: 'Sequential mechanical arm assembly & commissioning',
+    profile: Object.freeze({ hoverZ: 95, settleFrames: 45 }),
+    stages: Object.freeze([
+      Object.freeze({ id: 'base', label: '1/4 · Install shoulder turret onto podium', weight: 0.30 }),
+      Object.freeze({ id: 'link', label: '2/4 · Couple articulated boom into shoulder clevis', weight: 0.35 }),
+      Object.freeze({ id: 'tool', label: '3/4 · Lock wrist & gripper toolhead onto flange', weight: 0.25 }),
+      Object.freeze({ id: 'init', label: '4/4 · Commissioning: joint calibration & online ready', weight: 0.10 }),
+    ]),
+  }),
 });
 
 export function policyRecipeFor(task) {
@@ -82,8 +97,9 @@ export function bootstrapPolicy(task) {
  * Dense, observable rewards for the fold. They make optimisation meaningful
  * before the final folded state and keep the policy/task boundary declarative.
  */
-export function scoreTaskStages(task, { cloth, tips = [] } = {}) {
+export function scoreTaskStages(task, { cloth, tips = [], scene, rigid } = {}) {
   const recipe = policyRecipeFor(task);
+  if (recipe.kind === 'rigid-assembly' && (scene || rigid)) return scoreAutoPropagateStages(recipe, scene, rigid);
   if (recipe.kind === 'cloth-shirt-fold' && cloth) return scoreShirtFold(recipe, cloth);
   if (recipe.kind === 'cloth-half-fold' && cloth) return scoreHalfFold(recipe, cloth);
   if (recipe.kind !== 'cloth-fold' || !cloth) return { reward: 0, stage: 'route', complete: false };

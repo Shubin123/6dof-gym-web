@@ -194,16 +194,88 @@ function makeRigidScene(spec) {
   const meshes = new Map();
   for (const object of spec.objects) {
     const size = object.size / PX;
-    const material = new THREE.MeshStandardMaterial({ color: object.color, roughness: 0.45, metalness: 0.05 });
-    const mesh = object.shape === 'sphere'
-      ? new THREE.Mesh(new THREE.SphereGeometry(size / 2, 28, 18), material)
-      : new THREE.Mesh(new THREE.BoxGeometry(size, size, size), material);
-    if (object.shape === 'sphere') {
-      // A band round the equator makes the ball's roll visible.
-      const band = new THREE.Mesh(new THREE.TorusGeometry(size / 2, size * 0.04, 8, 32), new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5 }));
-      mesh.add(band);
+    let mesh;
+    if (spec.goal.type === 'propagate' && object.id === 'arm_base') {
+      // Realistic Shoulder Turret Assembly (J1)
+      const turretGroup = new THREE.Group();
+      const baseDisc = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.18, 0.20, 0.09, 24),
+        new THREE.MeshStandardMaterial({ color: 0x2b3648, roughness: 0.5, metalness: 0.4 }),
+      );
+      baseDisc.position.y = 0.045;
+      baseDisc.castShadow = true;
+      turretGroup.add(baseDisc);
+
+      const clevisL = new THREE.Mesh(
+        new THREE.BoxGeometry(0.06, 0.16, 0.12),
+        new THREE.MeshStandardMaterial({ color: 0x3d4a60, roughness: 0.4, metalness: 0.5 }),
+      );
+      clevisL.position.set(-0.09, 0.12, 0);
+      clevisL.castShadow = true;
+      const clevisR = clevisL.clone();
+      clevisR.position.x = 0.09;
+      turretGroup.add(clevisL, clevisR);
+
+      const pivot = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.04, 0.04, 0.16, 16),
+        new THREE.MeshStandardMaterial({ color: 0x718096, roughness: 0.3, metalness: 0.7 }),
+      );
+      pivot.rotation.z = Math.PI / 2;
+      pivot.position.y = 0.14;
+      turretGroup.add(pivot);
+
+      mesh = turretGroup;
+    } else if (spec.goal.type === 'propagate' && object.id === 'arm_link') {
+      // Realistic Articulated Arm Boom (J2-J3)
+      const boomGroup = new THREE.Group();
+      const linkBar = new THREE.Mesh(
+        new THREE.BoxGeometry(0.12, 0.28, 0.12),
+        new THREE.MeshStandardMaterial({ color: 0x49c7e8, roughness: 0.4, metalness: 0.2 }),
+      );
+      linkBar.position.y = 0.14;
+      linkBar.castShadow = true;
+      boomGroup.add(linkBar);
+
+      const elbowJoint = new THREE.Mesh(
+        new THREE.SphereGeometry(0.09, 18, 14),
+        new THREE.MeshStandardMaterial({ color: 0x2b3648, roughness: 0.5, metalness: 0.4 }),
+      );
+      elbowJoint.position.y = 0.26;
+      elbowJoint.castShadow = true;
+      boomGroup.add(elbowJoint);
+
+      mesh = boomGroup;
+    } else if (spec.goal.type === 'propagate' && object.id === 'arm_tool') {
+      // Realistic 3-Axis Wrist & Gripper Toolhead (J4-J6)
+      const toolGroup = new THREE.Group();
+      const wristHousing = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.07, 0.08, 0.12, 16),
+        new THREE.MeshStandardMaterial({ color: 0x3d4a60, roughness: 0.5, metalness: 0.4 }),
+      );
+      wristHousing.position.y = 0.06;
+      wristHousing.castShadow = true;
+      toolGroup.add(wristHousing);
+
+      const fingerMat = new THREE.MeshStandardMaterial({ color: 0xc9fb5d, roughness: 0.35, metalness: 0.3 });
+      const fingerA = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.14, 0.04), fingerMat);
+      fingerA.position.set(-0.06, 0.16, 0);
+      fingerA.castShadow = true;
+      const fingerB = fingerA.clone();
+      fingerB.position.x = 0.06;
+      toolGroup.add(fingerA, fingerB);
+
+      mesh = toolGroup;
     } else {
-      mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0x0e131d, transparent: true, opacity: 0.5 })));
+      const material = new THREE.MeshStandardMaterial({ color: object.color, roughness: 0.45, metalness: 0.05 });
+      mesh = object.shape === 'sphere'
+        ? new THREE.Mesh(new THREE.SphereGeometry(size / 2, 28, 18), material)
+        : new THREE.Mesh(new THREE.BoxGeometry(size, size, size), material);
+      if (object.shape === 'sphere') {
+        const band = new THREE.Mesh(new THREE.TorusGeometry(size / 2, size * 0.04, 8, 32), new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5 }));
+        mesh.add(band);
+      } else {
+        mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0x0e131d, transparent: true, opacity: 0.5 })));
+      }
     }
     mesh.castShadow = true;
     mesh.receiveShadow = true;
@@ -257,8 +329,79 @@ function makeRigidScene(spec) {
     zone.position.copy(toWorld([...spec.goal.position, 0.8]));
     group.add(zone);
   }
+  let siblingRig = null;
+  let podiumGroup = null;
+  if (spec.goal.type === 'propagate') {
+    podiumGroup = new THREE.Group();
+
+    // 1. Column: EXACT SAME AS ARM A'S BASE PODIUM
+    const podiumColumn = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.3, 0.42, ARM.baseHeight / PX, 32),
+      new THREE.MeshStandardMaterial({ color: COLORS.base, roughness: 0.7, metalness: 0.25 }),
+    );
+    podiumColumn.position.y = (ARM.baseHeight / 2) / PX;
+    podiumColumn.castShadow = true;
+    podiumColumn.receiveShadow = true;
+    podiumGroup.add(podiumColumn);
+
+    // 2. Machined steel top mounting flange / interface plate with bolt circle
+    const topFlange = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.31, 0.31, 0.035, 32),
+      new THREE.MeshStandardMaterial({ color: 0x4a5568, roughness: 0.35, metalness: 0.55 }),
+    );
+    topFlange.position.y = (ARM.baseHeight / PX) + 0.0175;
+    topFlange.castShadow = true;
+    podiumGroup.add(topFlange);
+
+    const boltRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.18, 0.25, 24),
+      new THREE.MeshStandardMaterial({ color: 0x718096, roughness: 0.4, metalness: 0.6, side: THREE.DoubleSide }),
+    );
+    boltRing.rotation.x = -Math.PI / 2;
+    boltRing.position.y = (ARM.baseHeight / PX) + 0.036;
+    podiumGroup.add(boltRing);
+
+    // 3. Table floor base mounting collar at the bottom
+    const floorCollar = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.44, 0.46, 0.025, 32),
+      new THREE.MeshStandardMaterial({ color: 0x1a2230, roughness: 0.8, metalness: 0.2 }),
+    );
+    floorCollar.position.y = 0.0125;
+    floorCollar.receiveShadow = true;
+    podiumGroup.add(floorCollar);
+
+    // 4. Interactive floor guide ring (repositioning indicator)
+    const guideRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.48, 0.54, 36),
+      new THREE.MeshBasicMaterial({ color: 0x49c7e8, transparent: true, opacity: 0.65, side: THREE.DoubleSide }),
+    );
+    guideRing.rotation.x = -Math.PI / 2;
+    guideRing.position.y = 0.003;
+    podiumGroup.add(guideRing);
+
+    podiumGroup.position.copy(toWorld([...spec.goal.position, 0]));
+    group.add(podiumGroup);
+
+    // Full 6-DOF sibling arm initialized at the podium location
+    const siblingArmSpec = {
+      id: 'Sibling',
+      base: [...spec.goal.position],
+      baseHeight: 90,
+      lengths: [110, 100, 90, 80, 75, 70],
+      axes: ['yaw', 'pitch', 'pitch', 'yaw', 'pitch', 'yaw'],
+      jointLimit: 1.7,
+      yawLimit: Math.PI,
+      mirror: true,
+    };
+    siblingRig = makeArm(siblingArmSpec);
+    siblingRig.column.visible = false; // podiumGroup renders the identical full-sized column
+    siblingRig.links.forEach((l) => { l.visible = false; });
+    siblingRig.joints.forEach((j) => { j.visible = false; });
+    siblingRig.tool.visible = false;
+    group.add(siblingRig.group);
+  }
   // Balls come and go; their meshes are pooled by id in layoutRigid.
-  return { group, meshes, spec, balls: new Map() };
+  return { group, meshes, spec, balls: new Map(), siblingRig, podiumGroup };
 }
 
 /**
@@ -610,6 +753,51 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
       mesh.material.dispose();
       rigid.balls.delete(id);
     }
+
+    if (rigid.siblingRig && next.snapshot?.objects) {
+      const target = rigid.spec.goal.position;
+      const baseObj = next.snapshot.objects.find((o) => o.id === 'arm_base');
+      const linkObj = next.snapshot.objects.find((o) => o.id === 'arm_link');
+      const toolObj = next.snapshot.objects.find((o) => o.id === 'arm_tool');
+
+      const distBase = baseObj ? Math.hypot(baseObj.position[0] * 1000 - target[0], baseObj.position[2] * 1000 - target[1]) : 999;
+      const distLink = linkObj ? Math.hypot(linkObj.position[0] * 1000 - target[0], linkObj.position[2] * 1000 - target[1]) : 999;
+      const distTool = toolObj ? Math.hypot(toolObj.position[0] * 1000 - target[0], toolObj.position[2] * 1000 - target[1]) : 999;
+
+      const basePlaced = distBase < 30;
+      const linkPlaced = basePlaced && distLink < 35;
+      const toolPlaced = linkPlaced && distTool < 40;
+
+      rigid.siblingRig.links.forEach((l) => { l.visible = linkPlaced; });
+      rigid.siblingRig.joints.forEach((j) => { j.visible = linkPlaced; });
+      rigid.siblingRig.tool.visible = toolPlaced;
+
+      if (linkPlaced) {
+        let q = [0, 0.45, 0.75, 0, 0.45, 0];
+        if (toolPlaced) {
+          const progress = current.policyProgress || 0;
+          if (progress > 0.88) {
+            const t = Math.min(1, (progress - 0.88) / 0.12);
+            const flexYaw = Math.sin(t * Math.PI * 2) * 0.15;
+            q = [
+              0.35 + flexYaw,
+              0.45 + 0.50 * t,
+              0.75 + 0.40 * t,
+              -0.95 * t,
+              0.45 + 0.65 * t,
+              -0.6 * t,
+            ];
+          } else {
+            q = [0.35, 0.95, 1.15, -0.95, 1.1, -0.6];
+          }
+        }
+        layoutArm(rigid.siblingRig, { q, arm: rigid.siblingRig.arm, gripping: toolPlaced });
+      }
+
+      if (basePlaced && rigid.meshes.get('arm_base')) rigid.meshes.get('arm_base').visible = false;
+      if (linkPlaced && rigid.meshes.get('arm_link')) rigid.meshes.get('arm_link').visible = false;
+      if (toolPlaced && rigid.meshes.get('arm_tool')) rigid.meshes.get('arm_tool').visible = false;
+    }
   }
 
   /**
@@ -713,6 +901,7 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     const gap = armState.fingerHalfGap != null ? armState.fingerHalfGap / PX : (closed ? GRIPPER_GAP.closed : GRIPPER_GAP.open);
     rig.fingers.forEach((finger) => { finger.position.z = finger.userData.side * gap; });
 
+    if (!rig.goal) return;
     const goal = toWorld(armState.goal);
     rig.goal.group.position.set(goal.x, 0, goal.z);
     rig.goal.cube.position.y = goal.y;

@@ -26,8 +26,9 @@ const ARMS = [ARM, ARM_B];
 // this in sync with index.html's #policy-budget max attribute.
 const FOLD_STEP_BUDGET = 600;
 const SHIRT_STEP_BUDGET = 1200;
+const PROPAGATE_STEP_BUDGET = 1200;
 const maxPolicyBudget = (workflow = state.currentWorkflow) => (
-  workflow?.id === 'fold_shirt' ? SHIRT_STEP_BUDGET : FOLD_STEP_BUDGET
+  workflow?.id === 'fold_shirt' || workflow?.id === 'auto_propagate' ? 1200 : FOLD_STEP_BUDGET
 );
 
 const makeArmState = (arm) => ({
@@ -173,12 +174,17 @@ function advanceRigidPhysics(grips) {
  */
 function moveRigidGoal([x, y]) {
   const [minX, maxX, minY, maxY] = compiled.environment.safety.goal_workspace;
-  const point = [clamp(x, minX + 30, maxX - 30), clamp(y, minY + 30, maxY - 30)];
   const spec = structuredClone(state.rigidSpec);
   const { goal } = spec;
-  if (goal.type === 'zone') goal.position = point;
-  else if (goal.type === 'tray') spec.fixtures.find((fixture) => fixture.id === goal.fixture).position = point;
-  else spec.objects.find((object) => object.id === goal.on).position = point;
+  if (goal.type === 'propagate') {
+    goal.position = [clamp(x, 390, 480), clamp(y, 230, 310)];
+  } else if (goal.type === 'zone') {
+    goal.position = [clamp(x, minX + 30, maxX - 30), clamp(y, minY + 30, maxY - 30)];
+  } else if (goal.type === 'tray') {
+    spec.fixtures.find((fixture) => fixture.id === goal.fixture).position = [clamp(x, minX + 30, maxX - 30), clamp(y, minY + 30, maxY - 30)];
+  } else {
+    spec.objects.find((object) => object.id === goal.on).position = [clamp(x, minX + 30, maxX - 30), clamp(y, minY + 30, maxY - 30)];
+  }
   state.rigidSpec = spec;
   haltPolicy(HALT.IDLE, { silent: true });
   resetArms({ keepRigidSpec: true });
@@ -578,6 +584,80 @@ function updateRigid2D() {
     parts.push(`<rect class="rigid-zone${met}" x="${cx - w / 2}" y="${cy - d / 2}" width="${w}" height="${d}" rx="3"/>`);
     parts.push(`<text class="rigid-label" x="${cx}" y="${cy + d / 2 + 14}" text-anchor="middle">${success ? 'PLACED' : 'PLACE ZONE'}</text>`);
   }
+  if (spec.goal.type === 'propagate') {
+    const [cx, cy] = spec.goal.position;
+    // 2-D SVG Sibling Arm Podium (same geometry & radius as Arm A's base column)
+    parts.push(`
+      <g class="podium-marker${met}">
+        <!-- Base floor shadow -->
+        <ellipse cx="${fmt(cx, 1)}" cy="${fmt(cy + 4, 1)}" rx="36" ry="20" fill="rgba(0,0,0,0.3)"/>
+        <!-- Floor Guide Ring -->
+        <circle class="podium-guide-ring" cx="${fmt(cx, 1)}" cy="${fmt(cy, 1)}" r="38" fill="none" stroke="#49c7e8" stroke-width="1.8" stroke-dasharray="5 3"/>
+        <!-- Outer Table Mounting Flange with Bolts -->
+        <circle cx="${fmt(cx, 1)}" cy="${fmt(cy, 1)}" r="32" fill="#1b2432" stroke="#2b3648" stroke-width="3"/>
+        ${Array.from({ length: 8 }, (_, i) => {
+          const ang = (i * Math.PI) / 4;
+          const bx = cx + Math.cos(ang) * 27;
+          const by = cy + Math.sin(ang) * 27;
+          return `<circle cx="${fmt(bx, 1)}" cy="${fmt(by, 1)}" r="2" fill="#718096"/>`;
+        }).join('')}
+        <!-- Sturdy Base Column (Identical to Arm A) -->
+        <circle class="podium-column" cx="${fmt(cx, 1)}" cy="${fmt(cy, 1)}" r="24" fill="#222d40" stroke="#3d4a60" stroke-width="2.5"/>
+        <!-- Top Machined Mounting Interface Flange -->
+        <circle cx="${fmt(cx, 1)}" cy="${fmt(cy, 1)}" r="16" fill="#2d3748" stroke="#4a5568" stroke-width="1.5"/>
+        <circle cx="${fmt(cx, 1)}" cy="${fmt(cy, 1)}" r="8" fill="#1a202c"/>
+        <!-- Alignment Crosshair -->
+        <line class="podium-cross" x1="${fmt(cx - 20, 1)}" y1="${fmt(cy, 1)}" x2="${fmt(cx + 20, 1)}" y2="${fmt(cy, 1)}"/>
+        <line class="podium-cross" x1="${fmt(cx, 1)}" y1="${fmt(cy - 20, 1)}" x2="${fmt(cx, 1)}" y2="${fmt(cy + 20, 1)}"/>
+        <!-- Labels -->
+        <text class="rigid-label" x="${fmt(cx, 1)}" y="${fmt(cy + 48, 1)}" text-anchor="middle">${success ? 'SIBLING ARM · INSTALLED & ONLINE' : `SIBLING ARM PODIUM (${Math.round(cx)}, ${Math.round(cy)})`}</text>
+        ${state.policy.status === HALT.RUNNING ? '' : `<text class="propagate-hint" x="${fmt(cx, 1)}" y="${fmt(cy - 44, 1)}" text-anchor="middle">Click table to move podium</text>`}
+      </g>
+    `);
+    if (placed) {
+      // Full 6-DOF sibling arm rendered from forward kinematics
+      const siblingArm = {
+        id: 'Sibling',
+        base: [cx, cy],
+        baseHeight: 90,
+        lengths: [110, 100, 90, 80, 75, 70],
+        axes: ['yaw', 'pitch', 'pitch', 'yaw', 'pitch', 'yaw'],
+        jointLimit: 1.7,
+        yawLimit: Math.PI,
+        mirror: true,
+      };
+      const siblingQ = [0.35, 0.95, 1.15, -0.95, 1.1, -0.6];
+      const { points, forward } = forwardKinematics(siblingQ, siblingArm);
+      const linkPath = (project) => points.map((p, i) => `${i ? 'L' : 'M'}${fmt(project(p)[0], 1)} ${fmt(project(p)[1], 1)}`).join(' ');
+
+      const [tx, ty] = points.at(-1);
+      const [fx, fy] = forward;
+      const flatLen = Math.hypot(fx, fy) || 1;
+      const [nx, ny] = [-fy / flatLen, fx / flatLen];
+      const jawsPath = [-1, 1].map((side) => {
+        const from = [tx - fx * 16 + nx * side * 6, ty - fy * 16 + ny * side * 6];
+        const to = [tx + nx * side * 4, ty + ny * side * 4];
+        return `M${fmt(from[0], 1)} ${fmt(from[1], 1)} L${fmt(to[0], 1)} ${fmt(to[1], 1)}`;
+      }).join(' ');
+
+      parts.push(`
+        <g class="sibling-6dof-arm">
+          <!-- Arm Link Shadow -->
+          <path class="sibling-shadow" d="${linkPath(castShadow)}" fill="none" stroke="rgba(0,0,0,0.32)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+          <!-- 6 Articulated Links with Industrial Colors -->
+          <path class="sibling-links" d="${linkPath((p) => p)}" fill="none" stroke="#69d2df" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+          <!-- Joint Spheres with Metallic Housings -->
+          ${points.map(([jx, jy, jz], idx) => `
+            <circle cx="${fmt(jx, 1)}" cy="${fmt(jy, 1)}" r="${idx === 0 ? 14 : idx === points.length - 1 ? 8 : 10}" fill="${idx % 2 ? '#49c7e8' : '#222d40'}" stroke="#a6e6ef" stroke-width="2"/>
+          `).join('')}
+          <!-- Dual-finger Precision Gripper -->
+          <path class="sibling-gripper" d="${jawsPath}" fill="none" stroke="#c9fb5d" stroke-width="3.5" stroke-linecap="round"/>
+          <!-- Operational Status Callout -->
+          <text class="sibling-status-label" x="${fmt(cx, 1)}" y="${fmt(cy + 62, 1)}" text-anchor="middle" fill="#69d2df" font-size="11" font-weight="700">6-DOF SIBLING ARM · COMMISSIONED & ONLINE</text>
+        </g>
+      `);
+    }
+  }
   for (const wall of fenceWalls(spec.fence)) {
     const [cx, cy] = wall.center;
     const [length, thickness] = wall.size;
@@ -935,7 +1015,8 @@ function updateTelemetry() {
 /** Rigid tasks score the object, not the tool: its distance to the goal, and whether it is placed and at rest. */
 function updateRigidTelemetry() {
   const outcome = rigidOutcome(state.rigidSpec, state.rigid);
-  $('#distance').textContent = `object ${fmt(outcome.error / 10, 1)} cm`;
+  const isPropagate = state.rigidSpec?.goal?.type === 'propagate';
+  $('#distance').textContent = isPropagate ? `assembly ${fmt(outcome.error / 10, 1)} cm` : `object ${fmt(outcome.error / 10, 1)} cm`;
   $('#tool-height').textContent = activeArms().map((armState) => `${fmt(tipOf(armState)[2] / 10, 1)}`).join(' / ') + ' cm';
   $('#reward').textContent = fmt(outcome.success ? 0 : -outcome.error / 100, 3);
   $('#step').textContent = `${state.step} / ${compiled.environment.max_steps}`;
@@ -945,7 +1026,13 @@ function updateRigidTelemetry() {
   const actualSafety = evaluateCellSafety(activeArms().map(({ q, arm }) => ({ q, arm })), compiled.environment.safety);
   const reason = state.safetyNotice || actualSafety.reason;
   const safetyCopy = { floor: 'Blocked at floor', workspace: 'Blocked at floor edge', collision: 'Blocked arm collision', rate: 'Blocked joint-step jump' };
-  $('#safety-state').textContent = reason ? safetyCopy[reason] : outcome.held ? 'Holding object' : 'Within floor + collision limits';
+  $('#safety-state').textContent = reason
+    ? safetyCopy[reason]
+    : isPropagate && outcome.success
+    ? '6-DOF Sibling Arm installed & online'
+    : outcome.held
+    ? 'Holding module'
+    : 'Within floor + collision limits';
   $('#safety-state').style.color = reason ? '#b04a24' : '#45861a';
 }
 
@@ -1266,8 +1353,8 @@ function loadWorkflow(id, { scroll = false } = {}) {
   // tail) also outrun a 200-step horizon, and share the same ceiling.
   // Task 17's multi-stage shirt fold needs ~1067 steps to finish all 4 stages.
   const ceiling = maxPolicyBudget(workflow);
-  state.policy.budget = workflow.id === 'fold_shirt'
-    ? SHIRT_STEP_BUDGET
+  state.policy.budget = workflow.id === 'fold_shirt' || workflow.id === 'auto_propagate'
+    ? 1200
     : runsFullPlan(workflow) ? FOLD_STEP_BUDGET : workflow.horizon_steps;
   state.policy.loop = isClothFoldTask(workflow);
   $('#policy-loop').checked = state.policy.loop;
@@ -1314,7 +1401,11 @@ function loadWorkflow(id, { scroll = false } = {}) {
   renderTaskList();
   renderTaskDetail();
   updateArms();
-  syncSliders();
+  if (workflow.id === 'auto_propagate') {
+    $('#viewport-hint').textContent = 'Drag to orbit · scroll to zoom · click the table to choose the arm deployment area.';
+  } else if (!viewport.failed) {
+    $('#viewport-hint').textContent = 'Drag to orbit · scroll to zoom · click the floor to move a goal · drag a cube up or down to change its height.';
+  }
   if (scroll) $('#demo').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 

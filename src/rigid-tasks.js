@@ -10,6 +10,7 @@
  *   { type: 'tower', position: [x, y], height, tolerance }     a column of `height` cubes (the live task)
  */
 import { planPickPlaceMotion } from './rigid-plan.js';
+import { autoPropagateOutcome, planAutoPropagateTask } from './auto-propagate.js';
 
 /** Tool tip height above an object's bottom face at the grasp (mm). */
 export const GRASP_HEIGHT = 8;
@@ -53,7 +54,7 @@ const flat = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 /** Scene-space footprint center [x, y] of a task's goal, for drawing and for the planner. */
 export function goalCenter(rigid) {
   const { goal } = rigid;
-  if (goal.type === 'zone' || goal.type === 'tower') return goal.position;
+  if (goal.type === 'zone' || goal.type === 'tower' || goal.type === 'propagate') return goal.position;
   if (goal.type === 'tray') return rigid.fixtures.find((fixture) => fixture.id === goal.fixture).position;
   return null; // 'stack' follows the base object, which is live state
 }
@@ -86,6 +87,9 @@ export function pickPlacePoints(rigid, scene) {
 
 /** Plan the task's pick and place for the arm at `pose` from `scene`'s current state. */
 export function planRigidTask(rigid, scene, pose, safety) {
+  if (rigid.goal.type === 'propagate') {
+    return planAutoPropagateTask(rigid, scene, pose, safety);
+  }
   const { pick, place } = pickPlacePoints(rigid, scene);
   return planPickPlaceMotion(pose, { pick, place, hoverZ: rigid.hover_z ?? 90 }, safety);
 }
@@ -98,6 +102,9 @@ export function planRigidTask(rigid, scene, pose, safety) {
  */
 export function rigidOutcome(rigid, scene) {
   const { goal } = rigid;
+  if (goal.type === 'propagate') {
+    return autoPropagateOutcome(rigid, scene);
+  }
   if (goal.type === 'tower') {
     const height = towerStack(rigid, scene).length;
     const placed = height >= goal.height;

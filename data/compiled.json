@@ -99,6 +99,12 @@
       "name": "Rigid objects",
       "level": "PHYSICAL CONTACT",
       "blurb": "Real colliders: cubes and spheres with mass, friction, and gravity. The gripper only holds what is actually between its jaws, and whatever it lets go of falls, slides, or rolls."
+    },
+    {
+      "id": "auto_propagate",
+      "name": "Auto propagate",
+      "level": "SELF-REPLICATION",
+      "blurb": "Self-replicating robotics: an operating arm constructs a secondary articulated robotic arm from modular sub-assemblies and mounts it into a user-specified deployment area."
     }
   ],
   "workflows": [
@@ -861,6 +867,107 @@
       "baseline": "ACT / Diffusion Policy with multi-phase supervisor",
       "arms": 2,
       "goal_height": 10
+    },
+    {
+      "id": "auto_propagate",
+      "number": "18",
+      "name": "Auto-propagate arm",
+      "family": "auto_propagate",
+      "difficulty": 4,
+      "horizon_steps": 200,
+      "arms": 1,
+      "instruction": "Pick the second arm's podium location on the table, then run the policy to install the 6-DOF sibling arm from modular sub-assemblies.",
+      "goal": [
+        440,
+        280
+      ],
+      "goal_height": 20,
+      "object": "sibling_arm",
+      "metric": "full 6-DOF sibling arm assembled and operational on podium",
+      "summary": "Autonomous robot arm installation. The operating 6-DOF arm retrieves modular robotic sub-assemblies from the supply depot (shoulder turret, articulated arm boom, and wrist/gripper toolhead) and mechanically installs an articulated 6-DOF sibling robot arm onto the user-positioned base podium.",
+      "success": "Full 6-DOF sibling arm successfully installed onto base podium, commissioned with joint calibration, and operational online.",
+      "sensors": "Tool-tip force-torque monitoring, top-down eye-in-hand RGB-D alignment, and joint torque limits during multi-tier docking.",
+      "curriculum": [
+        "Position sibling arm podium in safe workspace",
+        "Install shoulder turret onto podium flange",
+        "Couple 6-DOF articulated boom into shoulder clevis",
+        "Dock wrist & gripper toolhead, then commission sibling arm"
+      ],
+      "failure_modes": [
+        "Misaligned placement topples the modular arm assembly",
+        "Releasing with excessive velocity knocks previous modules off the deployment site",
+        "Selecting an unreachable deployment zone violates joint workspace bounds"
+      ],
+      "guardrail": "Enforce vertical tool-down orientation during transport to avoid toppling prior modules; abort motion if placement contact force exceeds 15 N.",
+      "baseline": "Chained tool-down assembly policy",
+      "rigid": {
+        "objects": [
+          {
+            "id": "arm_base",
+            "name": "Shoulder Turret",
+            "shape": "box",
+            "size": 30,
+            "position": [
+              380,
+              160
+            ],
+            "yaw": 0,
+            "mass": 0.08,
+            "color": "#2b3648"
+          },
+          {
+            "id": "arm_link",
+            "name": "Articulated Arm Boom",
+            "shape": "box",
+            "size": 26,
+            "position": [
+              420,
+              160
+            ],
+            "yaw": 0,
+            "mass": 0.06,
+            "color": "#49c7e8"
+          },
+          {
+            "id": "arm_tool",
+            "name": "Wrist & Gripper Toolhead",
+            "shape": "box",
+            "size": 22,
+            "position": [
+              460,
+              170
+            ],
+            "yaw": 0,
+            "mass": 0.04,
+            "color": "#c9fb5d"
+          }
+        ],
+        "fixtures": [
+          {
+            "id": "depot",
+            "type": "tray",
+            "position": [
+              420,
+              165
+            ],
+            "inner": [
+              130,
+              50
+            ],
+            "wall": 4,
+            "height": 8
+          }
+        ],
+        "goal": {
+          "type": "propagate",
+          "marker": "podium",
+          "position": [
+            440,
+            280
+          ],
+          "tolerance": 15
+        }
+      }
     }
   ],
   "models": [

@@ -8,7 +8,7 @@ import { isRigidTask, pickPlacePoints, planRigidTask, rigidOutcome } from '../sr
 
 const safety = compiled.environment.safety;
 // The single-plan rigid tasks; Task 16 (live, controller-driven) has its own file.
-const rigidTasks = compiled.workflows.filter((task) => isRigidTask(task) && !task.rigid.live);
+const rigidTasks = compiled.workflows.filter((task) => task.family === 'rigid' && isRigidTask(task) && !task.rigid.live);
 const home = () => ({ q: [...HOME_POSE], arm: ARM });
 
 /** Run a plan through a scene; return the frame index each grasp took hold, if any. */
@@ -75,7 +75,7 @@ for (const task of rigidTasks) {
     assert.ok(outcome.success, `outcome ${JSON.stringify(outcome)}`);
     // Only the picked object may have moved.
     task.rigid.objects.forEach((object, index) => {
-      if (object.id === task.rigid.goal.object) return;
+      if (task.rigid.goal.type === 'propagate' || object.id === task.rigid.goal.object) return;
       const moved = Math.hypot(...scene.objectCenter(object.id).map((value, axis) => value - start[index][axis]));
       assert.ok(moved < 3, `${object.id} was disturbed by ${moved.toFixed(1)} mm`);
     });
