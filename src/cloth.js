@@ -211,7 +211,7 @@ export class ClothSimulator {
     const { columns, rows, width, height, tableZ, historyLimit, settleDisplacementLimit } = this.config;
     Object.assign(this, { columns, rows, width, height, tableZ, historyLimit, settleDisplacementLimit });
 
-    const mesh = gridMesh(this.columns, this.rows, this.width, this.height, this.tableZ);
+    const mesh = options.mesh || gridMesh(this.columns, this.rows, this.width, this.height, this.tableZ);
     const topology = buildClothTopology(mesh.positions, mesh.index);
     this.topology = topology;
     this.numVertices = topology.positions.length / 3;
@@ -219,6 +219,9 @@ export class ClothSimulator {
     this.springs = topology.springs;
     this.springKinds = topology.springKinds;
     this.numSprings = topology.springKinds.length;
+    this.foldType = options.foldType || 'towel';
+    this.regions = options.regions || null;
+    this.shirtMeshInfo = options.shirtMeshInfo || null;
 
     // --- stores (one element per point / per spring) ---
     this.positions = new Float32Array(this.numVertices * 3);
@@ -339,14 +342,16 @@ export class ClothSimulator {
    * since that pair shares a row, and `pinOnRelease: false` so a corner laid
    * down by Arm A rests on friction like Arm B's instead of being held.
    */
-  setAnchors(anchorA, anchorB, { foldAxis, pinOnRelease = true, partners = null } = {}) {
-    for (const idx of [...this.anchorsA, ...this.anchorsB]) this.graspable[idx] = 0;
+  setAnchors(anchorA, anchorB, { foldAxis, pinOnRelease = true, partners = null, additionalAnchors = [], foldType = null } = {}) {
+    for (const idx of [...this.anchorsA, ...this.anchorsB, ...(this.additionalAnchors || [])]) this.graspable[idx] = 0;
     this.anchorsA = [anchorA];
     this.anchorsB = [anchorB];
-    for (const idx of [anchorA, anchorB]) this.graspable[idx] = 1;
+    this.additionalAnchors = [...additionalAnchors];
+    for (const idx of [anchorA, anchorB, ...additionalAnchors]) this.graspable[idx] = 1;
     const rowOf = (idx) => Math.floor(idx / (this.columns + 1));
     this.foldAxis = foldAxis ?? (rowOf(anchorA) === rowOf(anchorB) ? 'columns' : 'rows');
     this.pinOnRelease = pinOnRelease;
+    if (foldType) this.foldType = foldType;
     // For a half fold, the corner each carried anchor is laid on.
     this.foldPartners = partners;
   }
@@ -618,12 +623,14 @@ export class ClothSimulator {
     const frictionPass = () => {
       const normal = Math.abs(this.gravity) / (this.substeps * this.substeps);
       const f = this.forces;
+      const staticMu = this.foldType === 'shirt' ? 4.0 : this.staticFriction;
+      const kineticMu = this.foldType === 'shirt' ? 3.0 : this.kineticFriction;
       for (let i = 0; i < this.numVertices; i += 1) {
         if (!resting[i]) continue;
         const o = i * 3;
         const lateral = Math.hypot(f[o], f[o + 1]);
         if (lateral < 1e-12) continue;
-        const keep = lateral <= this.staticFriction * normal ? 0 : 1 - (this.kineticFriction * normal) / lateral;
+        const keep = lateral <= staticMu * normal ? 0 : 1 - (kineticMu * normal) / lateral;
         p[o] -= f[o] * (1 - keep);
         p[o + 1] -= f[o + 1] * (1 - keep);
         f[o] *= keep;
@@ -640,6 +647,41 @@ export class ClothSimulator {
     //
     // The half that goes on top is the one Arm B's corner is on: B carries
     // in every fold (Task 7's right half, or Task 12's back or front half).
+    if (this.foldType === 'shirt' && this.regions) {
+      const regions = this.regions;
+      const rp = this.restPositions;
+      for (let i2 = 0; i2 < this.numVertices; i2 += 1) {
+        const x2 = p[i2 * 3];
+        const y2 = p[i2 * 3 + 1];
+        if (regions[i2] === 'sleeve_left' && x2 > -0.45) {
+          for (let i1 = 0; i1 < this.numVertices; i1 += 1) {
+            if (regions[i1] === 'torso_upper') {
+              const o1 = i1 * 3;
+              const o2 = i2 * 3;
+              if (Math.hypot(rp[o2] - rp[o1], rp[o2 + 1] - rp[o1 + 1]) >= 0.22) lift(i1, i2);
+            }
+          }
+        } else if (regions[i2] === 'sleeve_right' && x2 < 0.45) {
+          for (let i1 = 0; i1 < this.numVertices; i1 += 1) {
+            if (regions[i1] === 'torso_upper' || regions[i1] === 'sleeve_left') {
+              const o1 = i1 * 3;
+              const o2 = i2 * 3;
+              if (Math.hypot(rp[o2] - rp[o1], rp[o2 + 1] - rp[o1 + 1]) >= 0.22) lift(i1, i2);
+            }
+          }
+        } else if (regions[i2] === 'torso_lower' && y2 < 0.05) {
+          for (let i1 = 0; i1 < this.numVertices; i1 += 1) {
+            if (regions[i1] !== 'torso_lower') {
+              const o1 = i1 * 3;
+              const o2 = i2 * 3;
+              if (Math.hypot(rp[o2] - rp[o1], rp[o2 + 1] - rp[o1 + 1]) >= 0.22) lift(i1, i2);
+            }
+          }
+        }
+      }
+      frictionPass();
+      return;
+    }
     if (this.foldAxis === 'rows') {
       const halfRow = this.rows / 2;
       const highOnTop = Math.floor(this.anchorsB[0] / stride) > halfRow;
@@ -699,19 +741,20 @@ export class ClothSimulator {
 
   /** Restore a past snapshot instantly. */
   restore(snap) {
-    if (!snap) return;
+    if (!snap || !snap.positions) return;
+    if (snap.positions.length !== this.positions.length) return;
     this.positions.set(snap.positions);
-    if (snap.forces) this.forces.set(snap.forces);
+    if (snap.forces && snap.forces.length === this.forces.length) this.forces.set(snap.forces);
     else this.forces.fill(0);
-    this.captured = [...snap.captured];
-    this.wasCaptured = [...(snap.wasCaptured || snap.captured)];
+    this.captured = [...(snap.captured || [false, false])];
+    this.wasCaptured = [...(snap.wasCaptured || snap.captured || [false, false])];
     this.graspOrigins = (snap.graspOrigins || [null, null]).map((origin) => origin && { ...origin });
     this.released = [...(snap.released || [false, false])];
     this.tablePinA = snap.tablePinA && { ...snap.tablePinA };
-    this.settled = snap.settled;
-    if (snap.pointMagnet) {
+    this.settled = Boolean(snap.settled);
+    if (snap.pointMagnet && snap.pointMagnet.length === this.pointMagnet.length) {
       this.pointMagnet.set(snap.pointMagnet);
-      this.magnets.set(snap.magnets);
+      if (snap.magnets && snap.magnets.length === this.magnets.length) this.magnets.set(snap.magnets);
     } else {
       // Snapshots from before magnets existed: rebuild from the grasp flags.
       this.pointMagnet.fill(0);
@@ -802,6 +845,27 @@ export class ClothSimulator {
    */
   get2DPolygons(origin = [325, 240], pxPerUnit = 100) {
     const toScene = (i) => [origin[0] + this.positions[i * 3] * pxPerUnit, origin[1] + this.positions[i * 3 + 1] * pxPerUnit];
+
+    if (this.shirtMeshInfo) {
+      const faceUp = [];
+      const faceDown = [];
+      for (const quad of this.shirtMeshInfo.quads) {
+        const pts = quad.map(toScene);
+        let area = 0;
+        for (let k = 0; k < 4; k += 1) {
+          const [x1, y1] = pts[k];
+          const [x2, y2] = pts[(k + 1) % 4];
+          area += x1 * y2 - x2 * y1;
+        }
+        (area >= 0 ? faceUp : faceDown).push(pts);
+      }
+      const creasePoints = [];
+      for (const line of this.shirtMeshInfo.creaseLines) {
+        for (const idx of line) creasePoints.push(toScene(idx));
+      }
+      return { basePoints: [], creasePoints, faceUp, faceDown };
+    }
+
     const stride = this.columns + 1;
 
     // Base boundary polygon (counter-clockwise around perimeter)

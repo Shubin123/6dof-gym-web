@@ -14,6 +14,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { ARM, ARM_B, clamp, forwardKinematics, GOAL_Z } from './core.js';
 import { ClothSimulator } from './cloth.js';
+import { getShirtMeshInfo } from './shirt-fold.js';
 import { FOLD_GUIDE } from './fold-guide.js';
 import { fenceWalls, toolBasis } from './rigid.js';
 
@@ -322,6 +323,13 @@ function layoutFoldGuide(guide, stage, cornerB, pinA) {
   }
 }
 
+export function makeShirtGeometry(info) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(info.numVertices * 3), 3));
+  geo.setIndex(new THREE.BufferAttribute(info.mesh.index, 1));
+  return geo;
+}
+
 /** Spring-network cloth (see src/cloth.js) for the task-07 demonstration. */
 export function makeCloth() {
   const simulator = new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2 });
@@ -359,7 +367,7 @@ export function makeCloth() {
   group.position.copy(toWorld([325, 240, 0]));
   group.add(mesh, grid);
   group.visible = false;
-  const cloth = { group, geometry, simulator, taskId: null, foldTarget };
+  const cloth = { group, geometry, simulator, taskId: null, foldTarget, mesh, grid, material };
   syncClothGeometry(cloth);
   return cloth;
 }
@@ -622,12 +630,10 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
   };
 
   function layoutCloth() {
-    // Task 7 and Task 12 both fold the towel; Task 12's sits on the cell
-    // midline instead, and has no fixed left-half target footprint.
-    cloth.group.visible = current.taskId === 'fold' || current.taskId === 'fold_custom';
+    cloth.group.visible = current.taskId === 'fold' || current.taskId === 'fold_custom' || current.taskId === 'fold_shirt';
     cloth.foldTarget.visible = current.taskId === 'fold';
     if (current.clothOrigin) cloth.group.position.copy(toWorld([...current.clothOrigin, 0]));
-    foldGuide.group.visible = cloth.group.visible && Boolean(current.foldGuide);
+    foldGuide.group.visible = current.taskId === 'fold' && Boolean(current.foldGuide);
     if (foldGuide.group.visible) {
       const { stage, cornerB, pinA } = current.foldGuide;
       layoutFoldGuide(foldGuide, stage, cornerB, pinA);
@@ -638,6 +644,34 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     }
     if (cloth.taskId !== current.taskId) {
       cloth.taskId = current.taskId;
+      if (current.taskId === 'fold_shirt') {
+        const info = getShirtMeshInfo();
+        if (!cloth.shirtGeometry) cloth.shirtGeometry = makeShirtGeometry(info);
+        cloth.geometry = cloth.shirtGeometry;
+        cloth.mesh.geometry = cloth.shirtGeometry;
+        cloth.grid.geometry = cloth.shirtGeometry;
+        if (!cloth.shirtSimulator) {
+          cloth.shirtSimulator = new ClothSimulator({
+            columns: info.columns,
+            rows: info.rows,
+            width: info.width,
+            height: info.height,
+            tableZ: info.tableZ,
+            mesh: info.mesh,
+            foldType: 'shirt',
+            regions: info.regions,
+            shirtMeshInfo: info,
+          });
+        }
+        cloth.simulator = cloth.shirtSimulator;
+      } else {
+        if (!cloth.towelGeometry) cloth.towelGeometry = new THREE.PlaneGeometry(1.5, 1.2, 14, 11);
+        cloth.geometry = cloth.towelGeometry;
+        cloth.mesh.geometry = cloth.towelGeometry;
+        cloth.grid.geometry = cloth.towelGeometry;
+        if (!cloth.towelSimulator) cloth.towelSimulator = new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2 });
+        cloth.simulator = cloth.towelSimulator;
+      }
       cloth.simulator.reset();
     }
 
@@ -704,7 +738,7 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
       rig.group.visible = visible;
       // The fold plan does not chase goal cubes; the fold guide replaces them.
       // Neither do the rigid tasks, whose goal is where the object ends up.
-      const showGoal = visible && current.taskId !== 'fold' && current.taskId !== 'fold_custom' && !current.rigid;
+      const showGoal = visible && current.taskId !== 'fold' && current.taskId !== 'fold_custom' && current.taskId !== 'fold_shirt' && !current.rigid;
       rig.goal.group.visible = showGoal;
       motionLines[index].visible = showGoal;
       if (visible) layoutArm(rig, armState);

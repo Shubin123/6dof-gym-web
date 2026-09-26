@@ -7,6 +7,8 @@
  * trained production model. Real policies can replace `bootstrapPolicy` with
  * a checkpoint loader while retaining the same safety-gated interface.
  */
+import { scoreShirtFold } from './shirt-fold.js';
+
 export const TASK_POLICY_RECIPES = Object.freeze({
   default: Object.freeze({
     label: 'Geometric policy',
@@ -40,6 +42,21 @@ export const TASK_POLICY_RECIPES = Object.freeze({
       Object.freeze({ id: 'settle', label: 'settle without overstretch', weight: 0.15 }),
     ]),
   }),
+  // Task 17's shirt multi-fold: sequential folding of left sleeve inward,
+  // right sleeve inward, then bimanual bottom hem fold upward over the folded sleeves.
+  fold_shirt: Object.freeze({
+    label: 'Cloth-aware warm-start (shirt multi-fold)',
+    kind: 'cloth-shirt-fold',
+    training: 'Synthetic garment calibration',
+    profile: Object.freeze({ arcHeightSleeve: 35, arcHeightHem: 22, placeHeight: 6, settleFrames: 60 }),
+    stages: Object.freeze([
+      Object.freeze({ id: 'left_sleeve', label: 'fold left sleeve inward', weight: 0.25 }),
+      Object.freeze({ id: 'right_sleeve', label: 'fold right sleeve inward', weight: 0.25 }),
+      Object.freeze({ id: 'hem_carry', label: 'lift and carry bottom hem', weight: 0.25 }),
+      Object.freeze({ id: 'place_hem', label: 'lay hem on collar line', weight: 0.15 }),
+      Object.freeze({ id: 'settle', label: 'settle folded garment', weight: 0.10 }),
+    ]),
+  }),
 });
 
 export function policyRecipeFor(task) {
@@ -67,6 +84,7 @@ export function bootstrapPolicy(task) {
  */
 export function scoreTaskStages(task, { cloth, tips = [] } = {}) {
   const recipe = policyRecipeFor(task);
+  if (recipe.kind === 'cloth-shirt-fold' && cloth) return scoreShirtFold(recipe, cloth);
   if (recipe.kind === 'cloth-half-fold' && cloth) return scoreHalfFold(recipe, cloth);
   if (recipe.kind !== 'cloth-fold' || !cloth) return { reward: 0, stage: 'route', complete: false };
   const metrics = cloth.getFoldMetrics();

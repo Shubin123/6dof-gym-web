@@ -2,6 +2,7 @@ import './styles.css';
 import compiled from '../data/compiled.json';
 import registry from '../data/sources.json';
 import { planHalfFoldMotion } from './half-fold.js';
+import { getShirtMeshInfo, planShirtMultiFoldMotion, shirtFoldGuideSvg } from './shirt-fold.js';
 import { ARM, ARM_B, buildDatasetManifest, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, reduceSafeCellMotion, solveInverseKinematics } from './core.js';
 import { ClothSimulator, clothCorners } from './cloth.js';
 import { loadClothSettings, onClothSettingsChange } from './cloth-settings.js';
@@ -20,9 +21,14 @@ const ARMS = [ARM, ARM_B];
 // Ceiling for the Step budget slider and the fold task's default budget.
 // Raised from the old flat 400 because the fold plan's own settle tail (see
 // core.js's planTowelFoldMotion) needs ~477 steps to finish, then to 600 for
-// Task 12's half fold (half-fold.js), which runs to ~550; keep this in sync
-// with index.html's #policy-budget max attribute.
+// Task 12's half fold (half-fold.js), which runs to ~550, and 1200 for
+// Task 17's multi-stage shirt fold (shirt-fold.js), which runs to ~1067; keep
+// this in sync with index.html's #policy-budget max attribute.
 const FOLD_STEP_BUDGET = 600;
+const SHIRT_STEP_BUDGET = 1200;
+const maxPolicyBudget = (workflow = state.currentWorkflow) => (
+  workflow?.id === 'fold_shirt' ? SHIRT_STEP_BUDGET : FOLD_STEP_BUDGET
+);
 
 const makeArmState = (arm) => ({
   arm,
@@ -54,7 +60,9 @@ const state = {
   // restore() does a raw Float32Array.set() into this instance, so a size
   // mismatch throws when scrubbing the timeline.
   // Physics values come from the cloth settings page (cloth.html).
-  cloth2d: new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2, ...loadClothSettings() }),
+  towelSim: new ClothSimulator({ columns: 14, rows: 11, width: 1.5, height: 1.2, ...loadClothSettings() }),
+  shirtSim: null,
+  cloth2d: null,
   timeline: { currentStep: 0, totalSteps: 0, scrubbing: false },
   // Task 12 (Configurable fold): which edge the half fold lays over the
   // other. Either way both arms carry a corner, so four corners become two.
@@ -69,6 +77,7 @@ const state = {
   stack: null,
   live: { frame: null, last: 0, accumulator: 0, shots: 0 },
 };
+state.cloth2d = state.towelSim;
 
 const activeArms = () => state.arms.slice(0, state.armCount);
 /** Tasks whose plan runs to its own end rather than stopping at a goal distance. */
@@ -175,15 +184,34 @@ function moveRigidGoal([x, y]) {
   resetArms({ keepRigidSpec: true });
 }
 const controlledArm = () => state.arms[state.activeArm];
-const isClothFoldTask = (workflow) => workflow.id === 'fold' || workflow.id === 'fold_custom';
+const isClothFoldTask = (workflow) => workflow.id === 'fold' || workflow.id === 'fold_custom' || workflow.id === 'fold_shirt';
+
+function getShirtSimulator() {
+  if (!state.shirtSim) {
+    const info = getShirtMeshInfo();
+    state.shirtSim = new ClothSimulator({
+      columns: info.columns,
+      rows: info.rows,
+      width: info.width,
+      height: info.height,
+      tableZ: info.tableZ,
+      mesh: info.mesh,
+      foldType: 'shirt',
+      regions: info.regions,
+      shirtMeshInfo: info,
+      ...loadClothSettings(),
+    });
+  }
+  return state.shirtSim;
+}
 
 /**
- * Towel centre in scene pixels. Task 7 keeps its validated spot; Task 12's
- * towel sits on the cell midline, halfway between the two bases, because a
- * half fold needs each arm to reach both corners on its side - at Task 7's
- * spot the back-left corner is 67 px from Arm A's column, too close to lift.
+ * Cloth center in scene pixels. Task 7 keeps its spot; Task 12 and Task 17
+ * sit on the cell midline (380, 240), halfway between the arm bases.
  */
-const clothOrigin = (workflow = state.currentWorkflow) => (workflow.id === 'fold_custom' ? [380, 240] : [325, 240]);
+const clothOrigin = (workflow = state.currentWorkflow) => (
+  workflow.id === 'fold_shirt' || workflow.id === 'fold_custom' ? [380, 240] : [325, 240]
+);
 
 /** Task 12's corners: the two each arm carries, and the two they are laid on. */
 function halfFoldCorners() {
@@ -518,15 +546,16 @@ function updateCloth2D() {
   const cells = (quads) => quads.map((quad) => `${quad.map((pt, i) => `${i ? 'L' : 'M'}${fmt(pt[0], 1)} ${fmt(pt[1], 1)}`).join(' ')} Z`).join(' ');
   const creaseString = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${fmt(p[0], 1)} ${fmt(p[1], 1)}`).join(' ');
   const isCustom = state.currentWorkflow.id === 'fold_custom';
+  const isShirt = state.currentWorkflow.id === 'fold_shirt';
 
   clothGroup.innerHTML = `
-    ${isCustom ? '' : `
+    ${isCustom || isShirt ? '' : `
     <rect class="cloth-2d-target" x="250" y="180" width="75" height="120" rx="3" />
     <text class="cloth-2d-target-label" x="287.5" y="318" text-anchor="middle">FOLDED TARGET</text>`}
     <path class="cloth-2d-base" d="${cells(faceUp)}" />
     ${faceDown.length ? `<path class="cloth-2d-base cloth-2d-flipped" d="${cells(faceDown)}" />` : ''}
     <path class="cloth-2d-crease" d="${creaseString(creasePoints)}" />
-    ${isCustom ? configurableFoldGuideSvg() : foldGuideSvg()}
+    ${isShirt ? shirtFoldGuideSvg(state.cloth2d, clothOrigin(), 100) : isCustom ? configurableFoldGuideSvg() : foldGuideSvg()}
   `;
 }
 
@@ -691,14 +720,18 @@ function advanceClothPhysics() {
   for (let substep = 0; substep < 2; substep += 1) {
     state.cloth2d.step({ targetA: targets[0], targetB: targets[1], grips });
   }
-  const metrics = state.cloth2d.getFoldMetrics();
+  const metrics = state.cloth2d.getFoldMetrics ? state.cloth2d.getFoldMetrics() : {};
   state.policy.stageScore = scoreTaskStages(state.currentWorkflow, { cloth: state.cloth2d, tips: activeArms().map(tipOf) });
   const held = state.cloth2d.captured.map((value, index) => `${index ? 'B' : 'A'} ${value ? 'held' : 'free'}`).join(' · ');
   const score = state.policy.stageScore;
-  // A half fold is measured corner-to-partner; Task 7 by its two held corners.
-  const fold = score.metrics
-    ? `corners ${score.metrics.cornerGaps.map((gap) => fmt(gap * 10, 1)).join(' / ')} cm${score.complete ? ' · folded' : ''}`
-    : `${fmt(metrics.frontDistance * 10, 1)} cm${metrics.folded ? ' · folded' : ''}`;
+  let fold = '';
+  if (state.currentWorkflow.id === 'fold_shirt' && score.metrics) {
+    fold = `sleeves ${fmt(score.metrics.leftSleeveGap * 10, 1)} / ${fmt(score.metrics.rightSleeveGap * 10, 1)} cm${score.complete ? ' · folded' : ''}`;
+  } else if (score.metrics?.cornerGaps) {
+    fold = `corners ${score.metrics.cornerGaps.map((gap) => fmt(gap * 10, 1)).join(' / ')} cm${score.complete ? ' · folded' : ''}`;
+  } else {
+    fold = `${fmt(metrics.frontDistance * 10, 1)} cm${metrics.folded ? ' · folded' : ''}`;
+  }
   $('#cloth-status').textContent = `Cloth frames ${state.cloth2d.history.length} / 120 · ${held} · ${score.stage} ${Math.round(score.reward * 100)}% · fold: ${fold}`;
 }
 
@@ -1231,10 +1264,18 @@ function loadWorkflow(id, { scroll = false } = {}) {
   // in policyBudget() and the slider's max in index.html.
   // The rigid tasks' pick-and-place plans (~380 steps with their settle
   // tail) also outrun a 200-step horizon, and share the same ceiling.
-  state.policy.budget = runsFullPlan(workflow) ? FOLD_STEP_BUDGET : workflow.horizon_steps;
+  // Task 17's multi-stage shirt fold needs ~1067 steps to finish all 4 stages.
+  const ceiling = maxPolicyBudget(workflow);
+  state.policy.budget = workflow.id === 'fold_shirt'
+    ? SHIRT_STEP_BUDGET
+    : runsFullPlan(workflow) ? FOLD_STEP_BUDGET : workflow.horizon_steps;
   state.policy.loop = isClothFoldTask(workflow);
   $('#policy-loop').checked = state.policy.loop;
-  $('#policy-budget').value = state.policy.budget;
+  const budgetInput = $('#policy-budget');
+  if (budgetInput) {
+    budgetInput.max = String(ceiling);
+    budgetInput.value = state.policy.budget;
+  }
   $('#policy-budget-value').textContent = state.policy.budget;
   $('#policy-profile').textContent = policyRecipeFor(workflow).label;
   setHidden($('#cloth-status'), !isClothFoldTask(workflow));
@@ -1242,11 +1283,20 @@ function loadWorkflow(id, { scroll = false } = {}) {
   setHidden($('#fold-direction-picker'), workflow.id !== 'fold_custom');
   setHidden($('#live-status'), !isLiveRigidTask(workflow));
   $('#cloth-status').textContent = 'Cloth frames 0 / 120';
-  // Task 7 always grasps the true corners; only the configurable task varies
-  // it, and its own selection re-applies below.
-  if (workflow.id !== 'fold_custom') state.cloth2d?.setAnchors(0, state.cloth2d.columns);
+  if (workflow.id === 'fold_shirt') {
+    state.cloth2d = getShirtSimulator();
+    const info = getShirtMeshInfo();
+    state.cloth2d.setAnchors(info.landmarks.leftSleeveCuff, info.landmarks.rightSleeveCuff, {
+      additionalAnchors: [info.landmarks.hemLeft, info.landmarks.hemRight],
+      foldType: 'shirt',
+      pinOnRelease: false,
+    });
+  } else {
+    state.cloth2d = state.towelSim;
+    if (workflow.id !== 'fold_custom') state.cloth2d?.setAnchors(0, state.cloth2d.columns);
+    applyHalfFoldSelection();
+  }
   state.cloth2d?.reset();
-  applyHalfFoldSelection();
   viewport.instance?.resetCloth?.();
   state.rigidSpec = isRigidTask(workflow) ? structuredClone(workflow.rigid) : null;
   buildRigidScene();
@@ -1362,7 +1412,7 @@ function policyStep() {
   return haltState({ error, steps: state.policy.steps, budget: policyBudget() });
 }
 
-const policyBudget = () => clamp(Math.round(state.policy.budget), 1, FOLD_STEP_BUDGET);
+const policyBudget = () => clamp(Math.round(state.policy.budget), 1, maxPolicyBudget());
 
 /**
  * Advance the run by `speed` control steps per animation frame.
@@ -1443,7 +1493,9 @@ async function runPolicyPlanning(token) {
     await yieldForSolverFeedback();
     if (!isCurrent()) return;
     const warmStart = bootstrapPolicy(state.currentWorkflow);
-    if (state.currentWorkflow.id === 'fold_custom') {
+    if (state.currentWorkflow.id === 'fold_shirt') {
+      motion = planShirtMultiFoldMotion(poses, compiled.environment.safety, warmStart.profile);
+    } else if (state.currentWorkflow.id === 'fold_custom') {
       // Half fold: each arm carries its side's corner onto the one opposite.
       const { carried, partners } = halfFoldCorners();
       const carry = carried.map((idx, arm) => [clothRestScenePoint(idx), clothRestScenePoint(partners[arm])]);
@@ -1689,8 +1741,10 @@ function installListeners() {
     renderModels();
   });
   // Tuning on the cloth settings page (usually another tab) takes effect on
-  // the next cloth step without resetting the towel.
-  onClothSettingsChange((settings) => state.cloth2d.configure(settings));
+  onClothSettingsChange((settings) => {
+    state.towelSim?.configure(settings);
+    state.shirtSim?.configure(settings);
+  });
   $('#run-policy').addEventListener('click', () => {
     if (state.policy.status === HALT.RUNNING || state.policy.planning) haltPolicy(HALT.OPERATOR);
     else startPolicy();

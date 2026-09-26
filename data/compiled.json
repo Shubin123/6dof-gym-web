@@ -823,6 +823,44 @@
           "thickness": 6
         }
       }
+    },
+    {
+      "id": "fold_shirt",
+      "number": "17",
+      "name": "Shirt multi-fold",
+      "family": "laundry",
+      "difficulty": 5,
+      "horizon_steps": 200,
+      "instruction": "Fold the left sleeve inward, fold the right sleeve inward, then bimanually fold the bottom hem upward to complete the shirt multi-fold.",
+      "goal": [
+        290,
+        190
+      ],
+      "goal_b": [
+        470,
+        190
+      ],
+      "object": "shirt",
+      "metric": "multi-fold sleeve & hem alignment",
+      "summary": "A multi-stage garment fold on a complex deformable shape. Unlike rectangular towels, a shirt features sleeves extending from the central torso. The bimanual policy executes a multi-fold sequence: folding both sleeves inward across the body, followed by folding the bottom hem upward to meet the collar line, producing a compact folded garment.",
+      "success": "Both sleeves folded across the body within 2 cm tolerance, hem folded upward with all layers separated, stretch error < 0.25, and fabric settled.",
+      "sensors": "Overhead RGB-D + a wrist camera per arm. Depth tracks sleeve edges, body crease lines, and layer heights.",
+      "curriculum": [
+        "Sleeve grasping and single sleeve inward fold",
+        "Opposite sleeve inward fold with anchor pin",
+        "Full bimanual sleeve tuck sequence",
+        "Bottom hem upward fold over folded sleeves",
+        "Complete autonomous multi-fold shirt reset"
+      ],
+      "failure_modes": [
+        "Sleeve unfolds due to insufficient overlap or release tension",
+        "Second sleeve fold snags previously folded first sleeve",
+        "Hem fold drags entire shirt instead of hinging along the waist line"
+      ],
+      "guardrail": "Keep the arm within rated velocity and acceleration limits during deformable manipulation; maintain safe dual-arm clearance throughout sequential multi-fold phases.",
+      "baseline": "ACT / Diffusion Policy with multi-phase supervisor",
+      "arms": 2,
+      "goal_height": 10
     }
   ],
   "models": [
