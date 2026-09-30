@@ -1018,6 +1018,7 @@ const SAFETY_COPY = {
   bend: 'Blocked at bend limit',
   self: 'Blocked self-collision',
   obstacle: 'Blocked at obstacle',
+  singular: 'Blocked near singularity',
 };
 
 /**

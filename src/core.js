@@ -159,6 +159,61 @@ export function linkBendAngles(points) {
   return dirs.slice(1).map((dir, i) => Math.acos(clamp(dot(dirs[i], dir), -1, 1)));
 }
 
+/** Eigenvalues of a small symmetric matrix by cyclic Jacobi rotations. */
+function symmetricEigenvalues(matrix) {
+  const a = matrix.map((row) => [...row]);
+  const n = a.length;
+  for (let sweep = 0; sweep < 50; sweep += 1) {
+    let off = 0;
+    for (let p = 0; p < n; p += 1) for (let r = p + 1; r < n; r += 1) off += a[p][r] ** 2;
+    if (off < 1e-20) break;
+    for (let p = 0; p < n; p += 1) {
+      for (let r = p + 1; r < n; r += 1) {
+        if (Math.abs(a[p][r]) < 1e-15) continue;
+        const theta = (a[r][r] - a[p][p]) / (2 * a[p][r]);
+        const t = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+        const c = 1 / Math.sqrt(t * t + 1);
+        const sn = t * c;
+        for (let k = 0; k < n; k += 1) {
+          const kp = a[k][p];
+          const kr = a[k][r];
+          a[k][p] = c * kp - sn * kr;
+          a[k][r] = sn * kp + c * kr;
+        }
+        for (let k = 0; k < n; k += 1) {
+          const pk = a[p][k];
+          const rk = a[r][k];
+          a[p][k] = c * pk - sn * rk;
+          a[r][k] = sn * pk + c * rk;
+        }
+      }
+    }
+  }
+  return a.map((row, i) => row[i]);
+}
+
+/**
+ * Singular values of the arm's full 6 x n tool Jacobian, smallest first.
+ *
+ * Rows are the tip's linear velocity, divided by the arm's total reach so
+ * it is dimensionless, and the tool's angular velocity; column i is joint
+ * i's axis a_i: [a_i x (tip - p_i) / reach, a_i]. The smallest value falls
+ * to zero at every kind of singularity - wrist (two wrist axes aligned),
+ * elbow (the chain fully stretched or folded), shoulder (the wrist over the
+ * base axis) - where some tool motion needs unbounded joint speed. A mirror
+ * image has the same singular values, so a mirrored arm is measured
+ * unmirrored.
+ */
+export function jacobianSingularValues(q, arm = ARM) {
+  const plain = arm.mirror ? { ...arm, mirror: false } : arm;
+  const { points, axes } = forwardKinematics(q, plain);
+  const tip = points.at(-1);
+  const reach = arm.lengths.reduce((sum, length) => sum + length, 0);
+  const columns = axes.map((axis, i) => [...cross(axis, sub(tip, points[i])).map((value) => value / reach), ...axis]);
+  const jtj = columns.map((a) => columns.map((b) => dot(a.slice(0, 3), b.slice(0, 3)) + dot(a.slice(3), b.slice(3))));
+  return symmetricEigenvalues(jtj).map((value) => Math.sqrt(Math.max(0, value))).sort((x, y) => x - y);
+}
+
 /** An obstacle is the column an arm is bolted to when its centre sits under the arm's base. */
 const mountedOn = (arm, obstacle) => Math.hypot(arm.base[0] - obstacle.center[0], arm.base[1] - obstacle.center[1]) < 1;
 
@@ -177,6 +232,9 @@ const mountedOn = (arm, obstacle) => Math.hypot(arm.base[0] - obstacle.center[0]
  *                       clearance }] - pedestals, podiums, assembled stacks.
  *                       An arm skips its first link against the column it
  *                       stands on, so it may sit on it but not fold into it.
+ *   singularity_margin  min smallest singular value of each arm's
+ *                       normalised tool Jacobian (jacobianSingularValues):
+ *                       keeps every arm clear of all singular postures
  */
 export function evaluateCellSafety(poses, safety = {}) {
   const bounds = safety.goal_workspace || [-Infinity, Infinity, -Infinity, Infinity];
@@ -246,6 +304,12 @@ export function evaluateCellSafety(poses, safety = {}) {
     }
   }
 
+  // Singularity: every arm keeps full, well-conditioned control of its tool.
+  let singularity = Infinity;
+  if (safety.singularity_margin != null) {
+    for (const { q, arm = ARM } of poses) singularity = Math.min(singularity, jacobianSingularValues(q, arm)[0]);
+  }
+
   let reason = null;
   if (floorClearance < -1e-6) reason = 'floor';
   else if (boundaryClearance < -1e-6) reason = 'workspace';
@@ -253,6 +317,7 @@ export function evaluateCellSafety(poses, safety = {}) {
   else if (bendMargin < -1e-6) reason = 'bend';
   else if (selfClearance < (safety.self_clearance_px ?? 0) - 1e-6) reason = 'self';
   else if (obstacleMargin < -1e-6) reason = 'obstacle';
+  else if (singularity < (safety.singularity_margin ?? 0) - 1e-9) reason = 'singular';
   return {
     safe: reason === null,
     reason,
@@ -263,6 +328,7 @@ export function evaluateCellSafety(poses, safety = {}) {
     selfClearance,
     obstacleMargin,
     obstacle: obstacleMargin < -1e-6 ? obstacle : null,
+    singularity,
   };
 }
 

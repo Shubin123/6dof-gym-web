@@ -14,6 +14,8 @@
  *   self        no arm folds back into its own non-adjacent links
  *   podium      no link enters the sibling podium, the growing module stack
  *               on it, or the primary arm's pedestal
+ *   singular    no arm comes within `singularity_margin` of a singular
+ *               posture (smallest singular value of its tool Jacobian)
  *   arm-to-arm  once commissioned, the sibling's calibration sweep keeps
  *               `arm_clearance_px` from the parked primary arm
  *
@@ -51,6 +53,7 @@ export const PROPAGATE_CONSTRAINTS = Object.freeze({
   bend_limit_rad: 1.65,
   self_clearance_px: 40,
   obstacle_clearance_px: 6,
+  singularity_margin: 0.02,
 });
 
 /** The sibling arm: the primary's own manipulator, mirrored, bolted onto the podium. */
@@ -123,6 +126,7 @@ export function propagateSafety(rigid, safety = {}, { stacked = 0 } = {}) {
     ...safety,
     bend_limit_rad: constraints.bend_limit_rad,
     self_clearance_px: constraints.self_clearance_px,
+    singularity_margin: constraints.singularity_margin,
     obstacles: [...(safety.obstacles || []), ...obstacles],
   };
 }

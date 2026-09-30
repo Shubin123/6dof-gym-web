@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import compiled from '../data/compiled.json' with { type: 'json' };
-import { ARM, clamp, evaluateCellSafety, forwardKinematics, HOME_POSE, linkBendAngles } from '../src/core.js';
+import { ARM, ARM_B, clamp, evaluateCellSafety, forwardKinematics, HOME_POSE, jacobianSingularValues, linkBendAngles } from '../src/core.js';
 import { RigidScene } from '../src/rigid.js';
 import { goalCenter, planRigidTask, rigidOutcome } from '../src/rigid-tasks.js';
 import {
@@ -121,6 +121,7 @@ test('Multi-module auto-propagate motion plan is collision-free and rate-capped 
       const cell = evaluateCellSafety([primary, { q, arm: sibling }], propagateSafety(customRigid, safety));
       assert.equal(cell.safe, true, `Sibling sweep violated ${cell.reason}`);
       assert.ok(cell.armClearance >= safety.arm_clearance_px, 'Sibling keeps arm-to-arm clearance');
+      assert.ok(jacobianSingularValues(q, sibling)[0] >= task.rigid.constraints.singularity_margin, 'Sibling stays clear of singularities');
       prevS = q;
     }
   }
@@ -132,8 +133,9 @@ test('Physics simulation constructs secondary robot arm at user-picked location'
 
   // Verify all 3 modules initially in supply depot
   for (const center of startCenters) {
-    assert.ok(Math.abs(center[0] - 420) <= 65, 'Module staged in parts depot');
-    assert.ok(Math.abs(center[1] - 165) <= 25, 'Module staged in parts depot');
+    const depot = task.rigid.fixtures.find((fixture) => fixture.id === 'depot');
+    assert.ok(Math.abs(center[0] - depot.position[0]) <= depot.inner[0] / 2, 'Module staged in parts depot');
+    assert.ok(Math.abs(center[1] - depot.position[1]) <= depot.inner[1] / 2, 'Module staged in parts depot');
     assert.ok(center[2] >= 10 && center[2] < 20, 'Module rests on depot floor');
   }
 
@@ -247,4 +249,35 @@ test('Task 18 constraints reject bent, self-colliding, and podium-piercing poses
   const folded = [0, 1, 1.7, 0, 1.7, 0];
   const self = evaluateCellSafety([{ q: folded, arm: ARM }], { self_clearance_px: 40 });
   assert.equal(self.reason, 'self');
+});
+
+test('Jacobian singular values vanish at singular postures and match across mirrored arms', () => {
+  // Fully stretched: elbow and wrist both lose a direction.
+  const stretched = jacobianSingularValues([0, 0, 0, 0, 0, 0], ARM);
+  assert.equal(stretched.length, 6);
+  assert.ok(stretched[0] < 1e-6 && stretched[1] < 1e-6, 'straight arm is doubly singular');
+  // Home is well-conditioned, and a mirror image has the same values.
+  const home = jacobianSingularValues(HOME_POSE, ARM);
+  assert.ok(home[0] > 0.05);
+  jacobianSingularValues(HOME_POSE, ARM_B).forEach((value, i) => assert.ok(Math.abs(value - home[i]) < 1e-9));
+  // Sorted smallest first.
+  home.slice(1).forEach((value, i) => assert.ok(value >= home[i]));
+});
+
+test('Task 18 rejects near-singular poses and its whole plan stays clear of them', () => {
+  const margin = task.rigid.constraints.singularity_margin;
+  assert.ok(margin > 0);
+  const cell = propagateSafety(task.rigid, safety);
+  assert.equal(cell.singularity_margin, margin);
+  // A nearly straight arm: floor/bend/self are fine, only the singularity trips.
+  const nearStraight = [0.66, 0.05, 0.05, 0.05, 0.05, 0.05];
+  const check = evaluateCellSafety([{ q: nearStraight, arm: ARM }], { ...cell, goal_workspace: undefined, obstacles: [] });
+  assert.equal(check.reason, 'singular');
+  assert.ok(check.singularity < margin);
+  assert.equal(evaluateCellSafety([{ q: nearStraight, arm: ARM }], { singularity_margin: 0 }).safe, true);
+
+  const scene = new RigidScene(task.rigid, { arms: 1 });
+  const plan = planAutoPropagateTask(task.rigid, scene, { q: [...HOME_POSE], arm: ARM }, safety);
+  const worst = Math.min(...plan.frames.map(([q]) => jacobianSingularValues(q, ARM)[0]));
+  assert.ok(worst >= margin, `primary comes within ${worst} of a singularity`);
 });
