@@ -5,57 +5,231 @@
  * modular sub-assemblies from a parts depot (Shoulder Turret, Articulated Arm
  * Boom, and Wrist/Gripper Toolhead) and mechanically installs a full 6-DOF
  * sibling robotic arm onto the user-positioned base podium.
+ *
+ * The podium is a real column (the same size as the primary arm's own base),
+ * so the modules are seated on its top face and every frame of both arms is
+ * checked against the task's physical constraints:
+ *
+ *   bend        no joint folds its links past `bend_limit_rad`
+ *   self        no arm folds back into its own non-adjacent links
+ *   podium      no link enters the sibling podium, the growing module stack
+ *               on it, or the primary arm's pedestal
+ *   arm-to-arm  once commissioned, the sibling's calibration sweep keeps
+ *               `arm_clearance_px` from the parked primary arm
+ *
+ * Both arms' paths are then smoothed under the weighted jerk/snap/crackle/
+ * pop cost (limb-dynamics.js), and every smoothed frame is re-verified
+ * against the same constraints before it replaces the original.
  */
-import { ARM, clamp, HOME_POSE } from './core.js';
-import { planPickPlaceMotion } from './rigid-plan.js';
+import { ARM, clamp, evaluateCellSafety, forwardKinematics, planSafeMotion } from './core.js';
+import { KINEMATIC_WEIGHTS, smoothJointPath } from './limb-dynamics.js';
+import { planPickPlaceMotion, TOOL_DOWN_TOLERANCE, toolDownError } from './rigid-plan.js';
 
-export const PROPAGATE_STEP_BUDGET = 1200;
+/** The smoothed, re-timed plan runs ~1270 steps; this leaves headroom across the build area. */
+export const PROPAGATE_STEP_BUDGET = 1400;
+/**
+ * Corner easing for the assembly path: slow to half speed over 5 frames at
+ * each sharp turn. Chosen by sweep: 2.5x lower peak jerk, 8x lower RMS pop
+ * for ~17% more steps.
+ */
+const ASSEMBLY_EASE = Object.freeze({ radius: 5, floor: 0.5, turn: 0.5 });
 
 /** Bounding box of verified safe, collision-free deployment coordinates. */
 export const PROPAGATE_BUILD_WORKSPACE = Object.freeze({
-  minX: 390,
-  maxX: 480,
-  minY: 230,
-  maxY: 310,
+  minX: 430,
+  maxX: 460,
+  // The podium's 42 mm floor flange must clear the depot tray's front wall.
+  minY: 250,
+  maxY: 305,
 });
 
-/** Articulated ready posture for the constructed full 6-DOF sibling arm. */
-export const SIBLING_ARM_READY_POSE = Object.freeze([0.35, 0.95, 1.15, -0.95, 1.1, -0.6]);
+/** Mounting podium: the same column the primary arm stands on. */
+export const PODIUM = Object.freeze({ radius: 42, top_radius: 30, height: ARM.baseHeight });
 
-/** Modular robot arm sub-assemblies staged in the depot. */
-export const PROPAGATE_MODULES = Object.freeze([
-  Object.freeze({ id: 'arm_base', name: 'Shoulder Turret Assembly', size: 30, placeZ: 10, hoverZ: 95 }),
-  Object.freeze({ id: 'arm_link', name: 'Articulated Arm Boom', size: 26, placeZ: 40, hoverZ: 100 }),
-  Object.freeze({ id: 'arm_tool', name: 'Wrist & Gripper Toolhead', size: 22, placeZ: 66, hoverZ: 105 }),
+/** Physical constraints the task enforces when its spec declares none. */
+export const PROPAGATE_CONSTRAINTS = Object.freeze({
+  bend_limit_rad: 1.65,
+  self_clearance_px: 40,
+  obstacle_clearance_px: 6,
+});
+
+/** The sibling arm: the primary's own manipulator, mirrored, bolted onto the podium. */
+export const SIBLING_ARM = Object.freeze({ ...ARM, id: 'S', mirror: true });
+export const siblingArmAt = (position) => ({ ...SIBLING_ARM, base: [position[0], position[1]] });
+
+/**
+ * Posture the sibling is assembled in: folded over its podium, clear of the
+ * table edge and the primary arm from anywhere in the build workspace.
+ */
+export const SIBLING_PARK_POSE = Object.freeze([-1.62, 1.25, 1.42, -0.31, 1.31, -0.74]);
+/** Articulated ready posture: raised, inside every bend and clearance limit at any podium site. */
+export const SIBLING_ARM_READY_POSE = Object.freeze([0.59, 1.28, 0.3, 1.41, 1.02, 0.05]);
+/** Power-on self-test waypoints: J1 azimuth checkout either side of park, then unpark into ready. */
+export const SIBLING_CALIBRATION = Object.freeze([
+  Object.freeze([-1.42, 1.25, 1.42, -0.31, 1.31, -0.74]),
+  Object.freeze([-1.82, 1.25, 1.42, -0.31, 1.31, -0.74]),
+  SIBLING_ARM_READY_POSE,
 ]);
+
+/** Modular robot arm sub-assemblies staged in the depot, bottom of the stack first. */
+export const PROPAGATE_MODULES = Object.freeze([
+  // hoverZ carries each module's bottom face clear over the stack it joins.
+  Object.freeze({ id: 'arm_base', name: 'Shoulder Turret Assembly', size: 30, hoverZ: 115 }),
+  Object.freeze({ id: 'arm_link', name: 'Articulated Arm Boom', size: 26, hoverZ: 145 }),
+  Object.freeze({ id: 'arm_tool', name: 'Wrist & Gripper Toolhead', size: 22, hoverZ: 172 }),
+]);
+
+/** Tip height above a module's bottom at the grasp, plus the drop gap on release. */
+const GRASP_Z = 8;
+const RELEASE_GAP = 2;
 
 const flat = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 
+/** Height of the module stack's bottom face for each module, resting on the podium top. */
+export function moduleSeatZ(index) {
+  return PODIUM.height + PROPAGATE_MODULES.slice(0, index).reduce((sum, mod) => sum + mod.size, 0);
+}
+
 /**
- * Plans the complete 3-stage mechanical installation trajectory to install
- * a secondary robotic arm onto the base podium at user-defined coordinates.
+ * The arm with its joint range narrowed to the bend limit. Every articulated
+ * joint turns about an axis perpendicular to its link, so the angle between
+ * consecutive links is exactly |q|: the solvers then search only bends the
+ * safety check will accept.
+ */
+export function bendLimitedArm(arm, rigid) {
+  const bend = rigid.constraints?.bend_limit_rad ?? PROPAGATE_CONSTRAINTS.bend_limit_rad;
+  return { ...arm, jointLimit: Math.min(arm.jointLimit, bend) };
+}
+
+/**
+ * The cell's safety block with this task's constraints layered on.
+ * `stacked` modules already sit on the podium and extend it as an obstacle.
+ */
+export function propagateSafety(rigid, safety = {}, { stacked = 0 } = {}) {
+  const constraints = { ...PROPAGATE_CONSTRAINTS, ...(rigid.constraints || {}) };
+  const podium = rigid.goal.podium || PODIUM;
+  const clearance = constraints.obstacle_clearance_px;
+  const center = rigid.goal.position;
+  const obstacles = [
+    { id: 'pedestal', center: ARM.base, radius: PODIUM.radius, topRadius: PODIUM.top_radius, height: ARM.baseHeight, clearance },
+    { id: 'podium', center, radius: podium.radius, topRadius: podium.top_radius, height: podium.height, clearance },
+  ];
+  if (stacked > 0) {
+    // A module's footprint is its half-diagonal; the widest placed one bounds the stack.
+    const radius = Math.max(...PROPAGATE_MODULES.slice(0, stacked).map((mod) => mod.size / Math.SQRT2));
+    obstacles.push({ id: 'assembly', center, radius, height: moduleSeatZ(stacked), clearance });
+  }
+  return {
+    ...safety,
+    bend_limit_rad: constraints.bend_limit_rad,
+    self_clearance_px: constraints.self_clearance_px,
+    obstacles: [...(safety.obstacles || []), ...obstacles],
+  };
+}
+
+/**
+ * Plan the sibling's power-on calibration sweep, from its assembled park
+ * pose through SIBLING_CALIBRATION, against the parked primary arm. Every
+ * frame keeps both arms apart, off both columns, and inside the bend limit.
+ */
+export function planSiblingCommissioning(rigid, safety, primary) {
+  const arm = bendLimitedArm(siblingArmAt(rigid.goal.position), rigid);
+  const cellSafety = propagateSafety(rigid, safety, { stacked: 0 });
+  let q = [...SIBLING_PARK_POSE];
+  const raw = [q];
+  const anchors = [];
+  for (const waypoint of SIBLING_CALIBRATION) {
+    const leg = planSafeMotion(q, [...waypoint], arm, cellSafety, [primary]);
+    if (!leg) return null;
+    raw.push(...leg);
+    anchors.push(raw.length - 1);
+    q = leg.at(-1);
+  }
+  // Ease through the checkout waypoints; only the final ready pose is pinned.
+  const { frames } = smoothJointPath(raw, {
+    arm,
+    anchors: anchors.slice(-1),
+    validate: (pose) => evaluateCellSafety([primary, { q: pose, arm }], cellSafety).safe,
+  });
+  return { arm, frames };
+}
+
+/**
+ * Smooth the primary arm's assembly path under the weighted derivative cost.
+ * Gripper changes and stage ends stay pinned. While a module is held, or the
+ * open fingers are below carry height around one, a tool-down frame must
+ * stay tool-down and within 1.5 px of where it was, so a module is never
+ * swung or dragged; above that, free-space corners may round off. Every
+ * frame keeps its stage's constraints.
+ */
+function smoothAssembly(frames, grips, stageEnds, arm, rigid, safety) {
+  const tipAt = (q) => forwardKinematics(q, arm).points.at(-1);
+  const path = frames.map(([q]) => q);
+  const anchors = [...stageEnds];
+  grips.forEach((grip, i) => { if (i && grip[0] !== grips[i - 1][0]) anchors.push(i - 1, i); });
+  const stageOf = (index) => stageEnds.findIndex((end) => index <= end);
+  const stageSafety = PROPAGATE_MODULES.map((_, stacked) => propagateSafety(rigid, safety, { stacked }));
+  const reference = path.map((q, index) => {
+    const { forward } = forwardKinematics(q, arm);
+    const tip = tipAt(q);
+    const hoverZ = PROPAGATE_MODULES[Math.max(0, stageOf(index))].hoverZ;
+    const down = Math.hypot(forward[0], forward[1]) < TOOL_DOWN_TOLERANCE;
+    return { tip, locked: down && (grips[index][0] || tip[2] < hoverZ - 1) };
+  });
+  const smooth = smoothJointPath(path, {
+    arm,
+    anchors,
+    ease: ASSEMBLY_EASE,
+    validate: (q, at) => {
+      const lo = Math.floor(at);
+      const hi = Math.min(path.length - 1, lo + 1);
+      const index = Math.round(at);
+      if (reference[lo].locked || reference[hi].locked) {
+        // Where a re-timed frame falls between two source frames, it must
+        // follow the straight tool line between their tips.
+        const t = at - lo;
+        const tip = reference[lo].tip.map((value, axis) => value + (reference[hi].tip[axis] - value) * t);
+        const err = toolDownError(q, arm, tip);
+        if (err.position > 1.5 || err.tilt >= TOOL_DOWN_TOLERANCE) return false;
+      }
+      return evaluateCellSafety([{ q, arm }], stageSafety[Math.max(0, stageOf(index))]).safe;
+    },
+  });
+  // Grips and stage ends follow each output frame's source frame; anchors
+  // map to integer source indexes, so every gripper change stays exact.
+  const byIndex = smooth.source.map((at) => Math.round(at));
+  return {
+    frames: smooth.frames.map((q) => [q]),
+    grips: byIndex.map((index) => [...grips[index]]),
+    stageEnds: stageEnds.map((end) => smooth.source.lastIndexOf(end)),
+  };
+}
+
+/**
+ * Plans the complete mechanical installation trajectory to install a
+ * secondary robotic arm onto the base podium at user-defined coordinates.
  *
- *  1. Pick and dock Shoulder Turret onto the base podium
+ *  1. Pick and dock Shoulder Turret onto the podium top flange
  *  2. Pick and couple Articulated Arm Boom into shoulder clevis
  *  3. Pick and lock Wrist & Gripper Toolhead onto forearm tool flange
- *  4. Retract primary arm to HOME and let the new arm commission & settle
+ *  4. Primary holds at HOME while the sibling runs its calibration sweep
  */
 export function planAutoPropagateTask(rigid, scene, pose, safety = {}) {
   const target = rigid.goal.position;
-  const arm = pose.arm || ARM;
+  const arm = bendLimitedArm(pose.arm || ARM, rigid);
   let curQ = [...pose.q];
   const frames = [];
   const grips = [];
   const stageEnds = [];
 
-  for (const mod of PROPAGATE_MODULES) {
+  for (const [index, mod] of PROPAGATE_MODULES.entries()) {
     const objCenter = scene.objectCenter(mod.id);
-    const pick = [objCenter[0], objCenter[1], 8];
-    const place = [target[0], target[1], mod.placeZ];
+    const pick = [objCenter[0], objCenter[1], objCenter[2] - mod.size / 2 + GRASP_Z];
+    const place = [target[0], target[1], moduleSeatZ(index) + RELEASE_GAP + GRASP_Z];
     const plan = planPickPlaceMotion(
       { q: curQ, arm },
       { pick, place, hoverZ: mod.hoverZ, settleFrames: 25 },
-      safety,
+      propagateSafety(rigid, safety, { stacked: index }),
     );
     if (!plan) return null;
 
@@ -66,6 +240,19 @@ export function planAutoPropagateTask(rigid, scene, pose, safety = {}) {
     curQ = plan.frames.at(-1)[0];
     stageEnds.push(frames.length - 1);
   }
+  const smoothed = smoothAssembly(frames, grips, stageEnds, arm, rigid, safety);
+  frames.splice(0, frames.length, ...smoothed.frames);
+  grips.splice(0, grips.length, ...smoothed.grips);
+  stageEnds.splice(0, stageEnds.length, ...smoothed.stageEnds);
+
+  const sibling = planSiblingCommissioning(rigid, safety, { q: curQ, arm });
+  if (!sibling) return null;
+  const startFrame = frames.length;
+  for (let i = 0; i < sibling.frames.length; i += 1) {
+    frames.push([[...curQ]]);
+    grips.push([false]);
+  }
+  stageEnds.push(frames.length - 1);
 
   return {
     frames,
@@ -73,7 +260,26 @@ export function planAutoPropagateTask(rigid, scene, pose, safety = {}) {
     stageEnds,
     sourceFrames: frames.length,
     reducedBy: 0,
+    sibling: { arm: sibling.arm, frames: sibling.frames, startFrame },
+    weights: KINEMATIC_WEIGHTS,
   };
+}
+
+/** The sibling's joint pose at plan frame `index` (park before the sweep, ready after it). */
+export function siblingPoseAt(sibling, index) {
+  if (!sibling) return [...SIBLING_ARM_READY_POSE];
+  const at = clamp(index - sibling.startFrame, 0, sibling.frames.length - 1);
+  return [...sibling.frames[at]];
+}
+
+/**
+ * Live cell check for the telemetry: the primary pose against the task's
+ * constraints and, once it is assembled, the sibling arm at `siblingQ`.
+ */
+export function evaluatePropagateCell(rigid, safety, primary, { siblingQ = null, stacked = 0 } = {}) {
+  const poses = [primary];
+  if (siblingQ) poses.push({ q: siblingQ, arm: siblingArmAt(rigid.goal.position) });
+  return evaluateCellSafety(poses, propagateSafety(rigid, safety, { stacked: siblingQ ? 0 : stacked }));
 }
 
 /**
@@ -91,17 +297,14 @@ export function autoPropagateOutcome(rigid, scene) {
     return { success: false, placed: false, resting: false, held: false, error: 99 };
   }
 
-  const cBase = scene.objectCenter('arm_base');
-  const cLink = scene.objectCenter('arm_link');
-  const cTool = scene.objectCenter('arm_tool');
+  const centers = PROPAGATE_MODULES.map((mod) => scene.objectCenter(mod.id));
+  const [dBase, dLink, dTool] = centers.map((center) => flat(center, target));
+  // Each module is seated when it sits over the podium at its stack height.
+  const seated = (index, slack) => Math.abs(centers[index][2] - (moduleSeatZ(index) + PROPAGATE_MODULES[index].size / 2)) < slack;
 
-  const dBase = flat(cBase, target);
-  const dLink = flat(cLink, target);
-  const dTool = flat(cTool, target);
-
-  const basePlaced = dBase <= tolerance && Math.abs(cBase[2] - 15) < 6;
-  const linkPlaced = dLink <= tolerance + 4 && Math.abs(cLink[2] - 43) < 8;
-  const toolPlaced = dTool <= tolerance + 6 && Math.abs(cTool[2] - 67) < 10;
+  const basePlaced = dBase <= tolerance && seated(0, 6);
+  const linkPlaced = dLink <= tolerance + 4 && seated(1, 8);
+  const toolPlaced = dTool <= tolerance + 6 && seated(2, 10);
   const placed = basePlaced && linkPlaced && toolPlaced;
 
   const held = scene.grippers.some((g) => g.held);

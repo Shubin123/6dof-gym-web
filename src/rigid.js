@@ -218,6 +218,23 @@ export class RigidScene {
       }
     }
 
+    // A mounting podium: the solid column a task's sibling arm stands on
+    // (Task 18). Modules are seated on its top face, not on the table. The
+    // collider is the square inscribed in that face: box-on-box contact
+    // holds a module stack still, where cannon's faceted cylinder lets it
+    // creep. Arm clearance is checked against the true tapered column.
+    const podium = spec.goal?.podium;
+    if (podium) {
+      const half = (podium.top_radius / Math.SQRT2) * MM;
+      const body = new CANNON.Body({
+        type: CANNON.Body.STATIC,
+        shape: new CANNON.Box(new CANNON.Vec3(half, podium.height / 2 * MM, half)),
+      });
+      body.position.copy(toPhysics([...spec.goal.position, podium.height / 2]));
+      this.world.addBody(body);
+      this.fixtures.push({ id: 'podium', body, size: [podium.radius * 2, podium.radius * 2, podium.height] });
+    }
+
     // A fence: a low walled pen, so a knocked cube or a ball stays where the
     // arm can still reach it and every other rule - the workspace edge, the
     // arm's envelope - still covers it. See fenceWalls() for its shape.

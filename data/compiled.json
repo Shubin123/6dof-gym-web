@@ -908,8 +908,8 @@
             "shape": "box",
             "size": 30,
             "position": [
-              380,
-              160
+              460,
+              165
             ],
             "yaw": 0,
             "mass": 0.08,
@@ -934,8 +934,8 @@
             "shape": "box",
             "size": 22,
             "position": [
-              460,
-              170
+              380,
+              165
             ],
             "yaw": 0,
             "mass": 0.04,
@@ -965,7 +965,17 @@
             440,
             280
           ],
-          "tolerance": 15
+          "tolerance": 15,
+          "podium": {
+            "radius": 42,
+            "top_radius": 30,
+            "height": 90
+          }
+        },
+        "constraints": {
+          "bend_limit_rad": 1.65,
+          "self_clearance_px": 40,
+          "obstacle_clearance_px": 6
         }
       }
     }
