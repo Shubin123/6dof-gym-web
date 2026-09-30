@@ -110,6 +110,7 @@
 .podium-marker.met .podium-guide-ring{stroke:#79c845;stroke-dasharray:none}
 .podium-cross{stroke:#49c7e8;stroke-width:1.5;opacity:0.6}
 .podium-marker.met .podium-cross{stroke:#79c845}
+.podium-marker{pointer-events:none}
 .propagate-hint{fill:#ffbd4a;font:8.5px var(--mono);letter-spacing:.4px}
 .sibling-6dof-arm{pointer-events:none}
 .sibling-links{stroke:#69d2df;filter:drop-shadow(0 2px 4px rgba(0,0,0,.45))}

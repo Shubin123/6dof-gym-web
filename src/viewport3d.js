@@ -17,6 +17,7 @@ import { ClothSimulator } from './cloth.js';
 import { getShirtMeshInfo } from './shirt-fold.js';
 import { FOLD_GUIDE } from './fold-guide.js';
 import { fenceWalls, toolBasis } from './rigid.js';
+import { SIBLING_ARM_READY_POSE, SIBLING_PARK_POSE, siblingArmAt } from './auto-propagate.js';
 
 const PX = 100; // scene pixels per world unit
 /** Half the finger gap, world units: open, and closed on a towel corner. */
@@ -383,17 +384,7 @@ function makeRigidScene(spec) {
     group.add(podiumGroup);
 
     // Full 6-DOF sibling arm initialized at the podium location
-    const siblingArmSpec = {
-      id: 'Sibling',
-      base: [...spec.goal.position],
-      baseHeight: 90,
-      lengths: [110, 100, 90, 80, 75, 70],
-      axes: ['yaw', 'pitch', 'pitch', 'yaw', 'pitch', 'yaw'],
-      jointLimit: 1.7,
-      yawLimit: Math.PI,
-      mirror: true,
-    };
-    siblingRig = makeArm(siblingArmSpec);
+    siblingRig = makeArm(siblingArmAt(spec.goal.position));
     siblingRig.column.visible = false; // podiumGroup renders the identical full-sized column
     siblingRig.links.forEach((l) => { l.visible = false; });
     siblingRig.joints.forEach((j) => { j.visible = false; });
@@ -773,24 +764,8 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
       rigid.siblingRig.tool.visible = toolPlaced;
 
       if (linkPlaced) {
-        let q = [0, 0.45, 0.75, 0, 0.45, 0];
-        if (toolPlaced) {
-          const progress = current.policyProgress || 0;
-          if (progress > 0.88) {
-            const t = Math.min(1, (progress - 0.88) / 0.12);
-            const flexYaw = Math.sin(t * Math.PI * 2) * 0.15;
-            q = [
-              0.35 + flexYaw,
-              0.45 + 0.50 * t,
-              0.75 + 0.40 * t,
-              -0.95 * t,
-              0.45 + 0.65 * t,
-              -0.6 * t,
-            ];
-          } else {
-            q = [0.35, 0.95, 1.15, -0.95, 1.1, -0.6];
-          }
-        }
+        // Parked while it is being assembled, then the planned calibration sweep.
+        const q = toolPlaced ? current.siblingQ || [...SIBLING_ARM_READY_POSE] : [...SIBLING_PARK_POSE];
         layoutArm(rigid.siblingRig, { q, arm: rigid.siblingRig.arm, gripping: toolPlaced });
       }
 

@@ -130,11 +130,53 @@ export function forwardKinematics(q, arm = ARM) {
 }
 
 /**
+ * Distance from a point to a solid upright column standing on the table (zero
+ * inside it). `cylinder` is { center: [x, y], radius, height, topRadius? };
+ * a topRadius tapers it into a frustum, measured radially at the point's height.
+ */
+function cylinderPointDistance([x, y, z], { center, radius, height, topRadius = radius }) {
+  const r = radius + (topRadius - radius) * clamp(z / height, 0, 1);
+  const radial = Math.max(0, Math.hypot(x - center[0], y - center[1]) - r);
+  const vertical = Math.max(0, z - height, -z);
+  return Math.hypot(radial, vertical);
+}
+
+/** Closest approach of a link segment to an upright cylinder, sampled every few px. */
+export function segmentCylinderDistance(a, b, cylinder) {
+  const samples = Math.max(2, Math.ceil(distance(a, b) / 4));
+  let best = Infinity;
+  for (let s = 0; s <= samples; s += 1) {
+    const t = s / samples;
+    best = Math.min(best, cylinderPointDistance([0, 1, 2].map((axis) => a[axis] + (b[axis] - a[axis]) * t), cylinder));
+  }
+  return best;
+}
+
+/** Angle (rad) between each pair of consecutive links: how sharply the chain bends at joints 1..n-1. */
+export function linkBendAngles(points) {
+  const dirs = [];
+  for (let i = 0; i < points.length - 1; i += 1) dirs.push(unit(sub(points[i + 1], points[i])));
+  return dirs.slice(1).map((dir, i) => Math.acos(clamp(dot(dirs[i], dir), -1, 1)));
+}
+
+/** An obstacle is the column an arm is bolted to when its centre sits under the arm's base. */
+const mountedOn = (arm, obstacle) => Math.hypot(arm.base[0] - obstacle.center[0], arm.base[1] - obstacle.center[1]) < 1;
+
+/**
  * Validate complete arm geometry, not merely its goal marker.
  *
  * Link centre lines must remain over the marked floor and at/above its plane.
  * In a bimanual cell, every link pair must also retain the configured physical
  * clearance. The renderers and controllers consume this single result.
+ *
+ * Optional constraints, each off unless the safety block declares it:
+ *   bend_limit_rad      max angle between consecutive links (a number, or
+ *                       one entry per bending joint 1..5)
+ *   self_clearance_px   min distance between non-adjacent links of one arm
+ *   obstacles           upright cylinders [{ id, center, radius, height,
+ *                       clearance }] - pedestals, podiums, assembled stacks.
+ *                       An arm skips its first link against the column it
+ *                       stands on, so it may sit on it but not fold into it.
  */
 export function evaluateCellSafety(poses, safety = {}) {
   const bounds = safety.goal_workspace || [-Infinity, Infinity, -Infinity, Infinity];
@@ -164,16 +206,63 @@ export function evaluateCellSafety(poses, safety = {}) {
     }
   }
 
+  // Bend: every joint keeps its links from folding past the declared angle.
+  let bendMargin = Infinity;
+  const bendLimit = safety.bend_limit_rad;
+  if (bendLimit != null) {
+    for (const { points } of chains) {
+      linkBendAngles(points).forEach((angle, joint) => {
+        const limit = Array.isArray(bendLimit) ? bendLimit[joint] ?? Infinity : bendLimit;
+        bendMargin = Math.min(bendMargin, limit - angle);
+      });
+    }
+  }
+
+  // Self: a folded arm must not bring its own non-adjacent links together.
+  let selfClearance = Infinity;
+  if (safety.self_clearance_px != null) {
+    for (const { points } of chains) {
+      for (let i = 0; i < points.length - 1; i += 1) {
+        for (let j = i + 2; j < points.length - 1; j += 1) {
+          selfClearance = Math.min(selfClearance, segmentDistance(points[i], points[i + 1], points[j], points[j + 1]));
+        }
+      }
+    }
+  }
+
+  // Obstacles: fixed upright cylinders every link must stay clear of.
+  let obstacleMargin = Infinity;
+  let obstacle = null;
+  for (const cylinder of safety.obstacles || []) {
+    for (const { arm, points } of chains) {
+      const first = mountedOn(arm, cylinder) ? 1 : 0;
+      for (let i = first; i < points.length - 1; i += 1) {
+        const margin = segmentCylinderDistance(points[i], points[i + 1], cylinder) - (cylinder.clearance ?? 0);
+        if (margin < obstacleMargin) {
+          obstacleMargin = margin;
+          obstacle = cylinder.id ?? null;
+        }
+      }
+    }
+  }
+
   let reason = null;
   if (floorClearance < -1e-6) reason = 'floor';
   else if (boundaryClearance < -1e-6) reason = 'workspace';
   else if (armClearance < requiredArmClearance - 1e-6) reason = 'collision';
+  else if (bendMargin < -1e-6) reason = 'bend';
+  else if (selfClearance < (safety.self_clearance_px ?? 0) - 1e-6) reason = 'self';
+  else if (obstacleMargin < -1e-6) reason = 'obstacle';
   return {
     safe: reason === null,
     reason,
     floorClearance,
     boundaryClearance,
     armClearance,
+    bendMargin,
+    selfClearance,
+    obstacleMargin,
+    obstacle: obstacleMargin < -1e-6 ? obstacle : null,
   };
 }
 

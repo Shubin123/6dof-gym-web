@@ -11,6 +11,7 @@ import { bootstrapPolicy, policyRecipeFor, scoreTaskStages } from './task-polici
 import { FINGER, fenceWalls, RigidScene, sceneYaw, snapshotObject, toolBasis } from './rigid.js';
 import { goalCenter, isLiveRigidTask, isRigidTask, planRigidTask, rigidOutcome } from './rigid-tasks.js';
 import { StackController } from './stack-controller.js';
+import { evaluatePropagateCell, PROPAGATE_BUILD_WORKSPACE, SIBLING_ARM_READY_POSE, siblingArmAt, siblingPoseAt } from './auto-propagate.js';
 
 const $ = (selector) => document.querySelector(selector);
 const fmt = (value, digits = 2) => Number(value).toFixed(digits);
@@ -177,7 +178,8 @@ function moveRigidGoal([x, y]) {
   const spec = structuredClone(state.rigidSpec);
   const { goal } = spec;
   if (goal.type === 'propagate') {
-    goal.position = [clamp(x, 390, 480), clamp(y, 230, 310)];
+    const { minX, maxX, minY, maxY } = PROPAGATE_BUILD_WORKSPACE;
+    goal.position = [clamp(x, minX, maxX), clamp(y, minY, maxY)];
   } else if (goal.type === 'zone') {
     goal.position = [clamp(x, minX + 30, maxX - 30), clamp(y, minY + 30, maxY - 30)];
   } else if (goal.type === 'tray') {
@@ -565,6 +567,12 @@ function updateCloth2D() {
   `;
 }
 
+/** Task 18's sibling arm pose: parked until its calibration sweep, then following it, then ready. */
+function siblingQ() {
+  const { sibling, path, pathIndex } = state.policy;
+  return sibling && path ? siblingPoseAt(sibling, pathIndex) : [...SIBLING_ARM_READY_POSE];
+}
+
 /**
  * Top-down view of the rigid scene: the place target, then every object
  * lowest first with a cast shadow, scaled by height like the arm joints.
@@ -615,19 +623,9 @@ function updateRigid2D() {
       </g>
     `);
     if (placed) {
-      // Full 6-DOF sibling arm rendered from forward kinematics
-      const siblingArm = {
-        id: 'Sibling',
-        base: [cx, cy],
-        baseHeight: 90,
-        lengths: [110, 100, 90, 80, 75, 70],
-        axes: ['yaw', 'pitch', 'pitch', 'yaw', 'pitch', 'yaw'],
-        jointLimit: 1.7,
-        yawLimit: Math.PI,
-        mirror: true,
-      };
-      const siblingQ = [0.35, 0.95, 1.15, -0.95, 1.1, -0.6];
-      const { points, forward } = forwardKinematics(siblingQ, siblingArm);
+      // Full 6-DOF sibling arm rendered from forward kinematics, following
+      // its planned calibration sweep.
+      const { points, forward } = forwardKinematics(siblingQ(), siblingArmAt([cx, cy]));
       const linkPath = (project) => points.map((p, i) => `${i ? 'L' : 'M'}${fmt(project(p)[0], 1)} ${fmt(project(p)[1], 1)}`).join(' ');
 
       const [tx, ty] = points.at(-1);
@@ -972,6 +970,7 @@ function pushViewportState() {
     })),
     rigid: state.rigid ? { spec: state.rigidSpec, snapshot: state.rigid.snapshot() } : null,
     taskId: state.currentWorkflow.id,
+    siblingQ: state.rigidSpec?.goal?.type === 'propagate' ? siblingQ() : null,
     policyProgress: state.policy.path?.length ? state.policy.pathIndex / state.policy.path.length : 0,
     clothSnapshot: state.cloth2d.snapshot(),
     clothOrigin: clothOrigin(),
@@ -1007,10 +1006,19 @@ function updateTelemetry() {
   const atLimit = activeArms().some((armState) => armState.q.some((value, index) => Math.abs(value) >= jointLimitOf(index) - 1e-6));
   const actualSafety = evaluateCellSafety(activeArms().map(({ q, arm }) => ({ q, arm })), compiled.environment.safety);
   const reason = state.safetyNotice || actualSafety.reason;
-  const safetyCopy = { floor: 'Blocked at floor', workspace: 'Blocked at floor edge', collision: 'Blocked arm collision', rate: 'Blocked joint-step jump' };
-  $('#safety-state').textContent = reason ? safetyCopy[reason] : atLimit ? 'At a joint limit' : 'Within floor + collision limits';
+  $('#safety-state').textContent = reason ? SAFETY_COPY[reason] : atLimit ? 'At a joint limit' : 'Within floor + collision limits';
   $('#safety-state').style.color = reason || atLimit ? '#b04a24' : '#45861a';
 }
+
+const SAFETY_COPY = {
+  floor: 'Blocked at floor',
+  workspace: 'Blocked at floor edge',
+  collision: 'Blocked arm collision',
+  rate: 'Blocked joint-step jump',
+  bend: 'Blocked at bend limit',
+  self: 'Blocked self-collision',
+  obstacle: 'Blocked at obstacle',
+};
 
 /** Rigid tasks score the object, not the tool: its distance to the goal, and whether it is placed and at rest. */
 function updateRigidTelemetry() {
@@ -1023,11 +1031,16 @@ function updateRigidTelemetry() {
   const score = outcome.success ? 100 : clamp(90 - outcome.error / 2.7, 0, 90);
   $('#reward-bar').style.width = `${score}%`;
   $('#reward-bar-value').textContent = `${Math.round(score)}%`;
-  const actualSafety = evaluateCellSafety(activeArms().map(({ q, arm }) => ({ q, arm })), compiled.environment.safety);
+  const poses = activeArms().map(({ q, arm }) => ({ q, arm }));
+  // Task 18 also holds the arm to its bend, self, podium, and (once the
+  // sibling is assembled) arm-to-arm limits.
+  const actualSafety = isPropagate
+    ? evaluatePropagateCell(state.rigidSpec, compiled.environment.safety, poses[0], { siblingQ: outcome.placed ? siblingQ() : null })
+    : evaluateCellSafety(poses, compiled.environment.safety);
   const reason = state.safetyNotice || actualSafety.reason;
-  const safetyCopy = { floor: 'Blocked at floor', workspace: 'Blocked at floor edge', collision: 'Blocked arm collision', rate: 'Blocked joint-step jump' };
+  const obstacleCopy = { pedestal: 'Blocked at arm pedestal', podium: 'Blocked at sibling podium', assembly: 'Blocked at module stack' };
   $('#safety-state').textContent = reason
-    ? safetyCopy[reason]
+    ? reason === 'obstacle' ? obstacleCopy[actualSafety.obstacle] || 'Blocked at obstacle' : SAFETY_COPY[reason]
     : isPropagate && outcome.success
     ? '6-DOF Sibling Arm installed & online'
     : outcome.held
@@ -1401,6 +1414,7 @@ function loadWorkflow(id, { scroll = false } = {}) {
   renderTaskList();
   renderTaskDetail();
   updateArms();
+  syncSliders();
   if (workflow.id === 'auto_propagate') {
     $('#viewport-hint').textContent = 'Drag to orbit · scroll to zoom · click the table to choose the arm deployment area.';
   } else if (!viewport.failed) {
@@ -1637,6 +1651,7 @@ async function runPolicyPlanning(token) {
   state.policy.planningPhase = null;
   state.policy.path = motion.frames;
   state.policy.grips = motion.grips || null;
+  state.policy.sibling = motion.sibling || null;
   state.policy.pathIndex = 0;
   state.policy.status = HALT.RUNNING;
   state.policy.steps = 0;
