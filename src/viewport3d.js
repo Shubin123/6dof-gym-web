@@ -106,13 +106,17 @@ function makeArm(arm) {
   for (let i = 0; i < arm.lengths.length; i += 1) {
     const thickness = 0.2 - i * 0.017;
     // A unit-length bar along +Y, rotated onto each 3-D segment at layout time.
-    const link = new THREE.Mesh(new THREE.BoxGeometry(thickness, 1, thickness * 1.15), i % 2 ? accentMaterial : linkMaterial);
+    // Each link owns its material, so a grabbed limb can light up on its own.
+    const link = new THREE.Mesh(new THREE.BoxGeometry(thickness, 1, thickness * 1.15), (i % 2 ? accentMaterial : linkMaterial).clone());
+    link.userData.limb = i;
     link.castShadow = true;
     link.receiveShadow = true;
     group.add(link);
     links.push(link);
 
     const joint = new THREE.Mesh(new THREE.SphereGeometry(thickness * 0.66, 18, 12), jointMaterial);
+    // Joint i sits at the start of link i: grabbing it moves the limb before it.
+    joint.userData.limb = Math.max(0, i - 1);
     joint.castShadow = true;
     group.add(joint);
     joints.push(joint);
@@ -520,7 +524,7 @@ export function syncClothGeometry(cloth) {
   cloth.geometry.computeBoundingSphere();
 }
 
-export function createViewport3D(container, { workspace, onGoalPick, onGoalHeight, onClothFrame, onShoot }) {
+export function createViewport3D(container, { workspace, onGoalPick, onGoalHeight, onClothFrame, onShoot, onLimbDrag }) {
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
@@ -623,9 +627,47 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     renderer.domElement.style.cursor = rig ? 'ns-resize' : '';
   };
 
+  /**
+   * The arm limb under the pointer: { rig, limb, point } for a visible link
+   * or joint of an active arm. Limb i is link i; its far end is kinematic
+   * point i + 1, which is what a drag moves.
+   */
+  const pickLimb = (event) => {
+    setPointer(event);
+    const active = rigs.filter((rig) => rig.group.visible);
+    const meshes = active.flatMap((rig) => [...rig.links, ...rig.joints]);
+    const [first] = raycaster.intersectObjects(meshes, false);
+    if (!first) return null;
+    const rig = active.find((candidate) => candidate.links.includes(first.object) || candidate.joints.includes(first.object));
+    return { rig, limb: first.object.userData.limb, point: first.point.clone() };
+  };
+
+  const toScene = (v) => [v.x * PX + ARM.base[0], v.z * PX + ARM.base[1], v.y * PX];
+
+  let litLimb = null;
+  const lightLimb = (hit) => {
+    const link = hit ? hit.rig.links[hit.limb] : null;
+    if (litLimb === link) return;
+    if (litLimb) litLimb.material.emissive.setHex(0x000000);
+    litLimb = link;
+    if (litLimb) litLimb.material.emissive.setHex(0x3a2a08);
+  };
+
   const onPointerDown = (event) => {
     pressedAt = { x: event.clientX, y: event.clientY };
     const rig = pickGoal(event);
+    if (!rig && onLimbDrag) {
+      const hit = pickLimb(event);
+      if (!hit) return;
+      // Drag the limb's far end, keeping the grab offset so it does not jump.
+      const end = hit.rig.links[hit.limb].localToWorld(new THREE.Vector3(0, 0.5, 0));
+      drag = { limb: hit, offset: new THREE.Vector3().subVectors(hit.point, end), origin: hit.point.clone() };
+      controls.enabled = false;
+      lightLimb(hit);
+      renderer.domElement.style.cursor = 'grabbing';
+      renderer.domElement.setPointerCapture(event.pointerId);
+      return;
+    }
     if (!rig || !onGoalHeight) return;
     const origin = rig.goal.cube.getWorldPosition(new THREE.Vector3());
     if (!raycaster.ray.intersectPlane(facingPlane(origin), hit)) return;
@@ -638,10 +680,22 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
 
   const onPointerMove = (event) => {
     if (!drag) {
-      setHovered(pickGoal(event));
+      const goal = pickGoal(event);
+      setHovered(goal);
+      if (!goal && onLimbDrag) {
+        const hit = pickLimb(event);
+        lightLimb(hit);
+        if (hit) renderer.domElement.style.cursor = 'grab';
+      }
       return;
     }
     setPointer(event);
+    if (drag.limb) {
+      if (!raycaster.ray.intersectPlane(facingPlane(drag.origin), hit)) return;
+      const end = hit.clone().sub(drag.offset);
+      onLimbDrag(drag.limb.rig.arm.id, drag.limb.limb, toScene(end), { committed: false });
+      return;
+    }
     const origin = drag.rig.goal.cube.getWorldPosition(new THREE.Vector3());
     if (!raycaster.ray.intersectPlane(facingPlane(origin), hit)) return;
     const height = clamp((hit.y - drag.offset) * PX, GOAL_Z.min, GOAL_Z.max);
@@ -650,10 +704,16 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
 
   const endDrag = (event) => {
     if (!drag) return false;
-    const { rig } = drag;
+    const { rig, limb } = drag;
     drag = null;
     controls.enabled = true;
     if (renderer.domElement.hasPointerCapture?.(event.pointerId)) renderer.domElement.releasePointerCapture(event.pointerId);
+    if (limb) {
+      lightLimb(null);
+      renderer.domElement.style.cursor = '';
+      onLimbDrag(limb.rig.arm.id, limb.limb, null, { committed: true });
+      return true;
+    }
     // Replanning is deferred to the release: solving on every pointer move
     // would put a full IK search inside the drag loop.
     onGoalHeight(rig.arm.id, null, { committed: true });
@@ -672,7 +732,7 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     onGoalPick([hit.x * PX + ARM.base[0], hit.z * PX + ARM.base[1]]);
   };
 
-  const onPointerLeave = () => { if (!drag) setHovered(null); };
+  const onPointerLeave = () => { if (!drag) { setHovered(null); lightLimb(null); } };
 
   renderer.domElement.addEventListener('pointerdown', onPointerDown);
   renderer.domElement.addEventListener('pointermove', onPointerMove);
@@ -785,7 +845,6 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
     const [first] = raycaster.intersectObjects(targets, false);
     const point = first ? first.point : (raycaster.ray.intersectPlane(floorPlane, hit) ? hit.clone() : null);
     if (!point) return;
-    const toScene = (v) => [v.x * PX + ARM.base[0], v.z * PX + ARM.base[1], v.y * PX];
     const from = point.clone().addScaledVector(raycaster.ray.direction, -2.5);
     // Start above the pen wall, so the ball drops in rather than hitting it.
     from.y = Math.max(from.y, 1);

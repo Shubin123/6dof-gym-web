@@ -16,11 +16,23 @@
  *               on it, or the primary arm's pedestal
  *   arm-to-arm  once commissioned, the sibling's calibration sweep keeps
  *               `arm_clearance_px` from the parked primary arm
+ *
+ * Both arms' paths are then smoothed under the weighted jerk/snap/crackle/
+ * pop cost (limb-dynamics.js), and every smoothed frame is re-verified
+ * against the same constraints before it replaces the original.
  */
-import { ARM, clamp, evaluateCellSafety, HOME_POSE, planSafeMotion } from './core.js';
-import { planPickPlaceMotion } from './rigid-plan.js';
+import { ARM, clamp, evaluateCellSafety, forwardKinematics, planSafeMotion } from './core.js';
+import { KINEMATIC_WEIGHTS, smoothJointPath } from './limb-dynamics.js';
+import { planPickPlaceMotion, TOOL_DOWN_TOLERANCE, toolDownError } from './rigid-plan.js';
 
-export const PROPAGATE_STEP_BUDGET = 1200;
+/** The smoothed, re-timed plan runs ~1270 steps; this leaves headroom across the build area. */
+export const PROPAGATE_STEP_BUDGET = 1400;
+/**
+ * Corner easing for the assembly path: slow to half speed over 5 frames at
+ * each sharp turn. Chosen by sweep: 2.5x lower peak jerk, 8x lower RMS pop
+ * for ~17% more steps.
+ */
+const ASSEMBLY_EASE = Object.freeze({ radius: 5, floor: 0.5, turn: 0.5 });
 
 /** Bounding box of verified safe, collision-free deployment coordinates. */
 export const PROPAGATE_BUILD_WORKSPACE = Object.freeze({
@@ -124,14 +136,73 @@ export function planSiblingCommissioning(rigid, safety, primary) {
   const arm = bendLimitedArm(siblingArmAt(rigid.goal.position), rigid);
   const cellSafety = propagateSafety(rigid, safety, { stacked: 0 });
   let q = [...SIBLING_PARK_POSE];
-  const frames = [q];
+  const raw = [q];
+  const anchors = [];
   for (const waypoint of SIBLING_CALIBRATION) {
     const leg = planSafeMotion(q, [...waypoint], arm, cellSafety, [primary]);
     if (!leg) return null;
-    frames.push(...leg);
+    raw.push(...leg);
+    anchors.push(raw.length - 1);
     q = leg.at(-1);
   }
+  // Ease through the checkout waypoints; only the final ready pose is pinned.
+  const { frames } = smoothJointPath(raw, {
+    arm,
+    anchors: anchors.slice(-1),
+    validate: (pose) => evaluateCellSafety([primary, { q: pose, arm }], cellSafety).safe,
+  });
   return { arm, frames };
+}
+
+/**
+ * Smooth the primary arm's assembly path under the weighted derivative cost.
+ * Gripper changes and stage ends stay pinned. While a module is held, or the
+ * open fingers are below carry height around one, a tool-down frame must
+ * stay tool-down and within 1.5 px of where it was, so a module is never
+ * swung or dragged; above that, free-space corners may round off. Every
+ * frame keeps its stage's constraints.
+ */
+function smoothAssembly(frames, grips, stageEnds, arm, rigid, safety) {
+  const tipAt = (q) => forwardKinematics(q, arm).points.at(-1);
+  const path = frames.map(([q]) => q);
+  const anchors = [...stageEnds];
+  grips.forEach((grip, i) => { if (i && grip[0] !== grips[i - 1][0]) anchors.push(i - 1, i); });
+  const stageOf = (index) => stageEnds.findIndex((end) => index <= end);
+  const stageSafety = PROPAGATE_MODULES.map((_, stacked) => propagateSafety(rigid, safety, { stacked }));
+  const reference = path.map((q, index) => {
+    const { forward } = forwardKinematics(q, arm);
+    const tip = tipAt(q);
+    const hoverZ = PROPAGATE_MODULES[Math.max(0, stageOf(index))].hoverZ;
+    const down = Math.hypot(forward[0], forward[1]) < TOOL_DOWN_TOLERANCE;
+    return { tip, locked: down && (grips[index][0] || tip[2] < hoverZ - 1) };
+  });
+  const smooth = smoothJointPath(path, {
+    arm,
+    anchors,
+    ease: ASSEMBLY_EASE,
+    validate: (q, at) => {
+      const lo = Math.floor(at);
+      const hi = Math.min(path.length - 1, lo + 1);
+      const index = Math.round(at);
+      if (reference[lo].locked || reference[hi].locked) {
+        // Where a re-timed frame falls between two source frames, it must
+        // follow the straight tool line between their tips.
+        const t = at - lo;
+        const tip = reference[lo].tip.map((value, axis) => value + (reference[hi].tip[axis] - value) * t);
+        const err = toolDownError(q, arm, tip);
+        if (err.position > 1.5 || err.tilt >= TOOL_DOWN_TOLERANCE) return false;
+      }
+      return evaluateCellSafety([{ q, arm }], stageSafety[Math.max(0, stageOf(index))]).safe;
+    },
+  });
+  // Grips and stage ends follow each output frame's source frame; anchors
+  // map to integer source indexes, so every gripper change stays exact.
+  const byIndex = smooth.source.map((at) => Math.round(at));
+  return {
+    frames: smooth.frames.map((q) => [q]),
+    grips: byIndex.map((index) => [...grips[index]]),
+    stageEnds: stageEnds.map((end) => smooth.source.lastIndexOf(end)),
+  };
 }
 
 /**
@@ -169,6 +240,10 @@ export function planAutoPropagateTask(rigid, scene, pose, safety = {}) {
     curQ = plan.frames.at(-1)[0];
     stageEnds.push(frames.length - 1);
   }
+  const smoothed = smoothAssembly(frames, grips, stageEnds, arm, rigid, safety);
+  frames.splice(0, frames.length, ...smoothed.frames);
+  grips.splice(0, grips.length, ...smoothed.grips);
+  stageEnds.splice(0, stageEnds.length, ...smoothed.stageEnds);
 
   const sibling = planSiblingCommissioning(rigid, safety, { q: curQ, arm });
   if (!sibling) return null;
@@ -186,6 +261,7 @@ export function planAutoPropagateTask(rigid, scene, pose, safety = {}) {
     sourceFrames: frames.length,
     reducedBy: 0,
     sibling: { arm: sibling.arm, frames: sibling.frames, startFrame },
+    weights: KINEMATIC_WEIGHTS,
   };
 }
 

@@ -11,7 +11,8 @@ import { bootstrapPolicy, policyRecipeFor, scoreTaskStages } from './task-polici
 import { FINGER, fenceWalls, RigidScene, sceneYaw, snapshotObject, toolBasis } from './rigid.js';
 import { goalCenter, isLiveRigidTask, isRigidTask, planRigidTask, rigidOutcome } from './rigid-tasks.js';
 import { StackController } from './stack-controller.js';
-import { evaluatePropagateCell, PROPAGATE_BUILD_WORKSPACE, SIBLING_ARM_READY_POSE, siblingArmAt, siblingPoseAt } from './auto-propagate.js';
+import { LimbController, limbDragTarget } from './limb-dynamics.js';
+import { evaluatePropagateCell, PROPAGATE_BUILD_WORKSPACE, PROPAGATE_STEP_BUDGET, SIBLING_ARM_READY_POSE, siblingArmAt, siblingPoseAt } from './auto-propagate.js';
 
 const $ = (selector) => document.querySelector(selector);
 const fmt = (value, digits = 2) => Number(value).toFixed(digits);
@@ -23,14 +24,13 @@ const ARMS = [ARM, ARM_B];
 // Raised from the old flat 400 because the fold plan's own settle tail (see
 // core.js's planTowelFoldMotion) needs ~477 steps to finish, then to 600 for
 // Task 12's half fold (half-fold.js), which runs to ~550, and 1200 for
-// Task 17's multi-stage shirt fold (shirt-fold.js), which runs to ~1067; keep
-// this in sync with index.html's #policy-budget max attribute.
+// Task 17's multi-stage shirt fold (shirt-fold.js), which runs to ~1067, and
+// Task 18's smoothed assembly (auto-propagate.js's PROPAGATE_STEP_BUDGET);
+// keep the largest in sync with index.html's #policy-budget max attribute.
 const FOLD_STEP_BUDGET = 600;
 const SHIRT_STEP_BUDGET = 1200;
-const PROPAGATE_STEP_BUDGET = 1200;
-const maxPolicyBudget = (workflow = state.currentWorkflow) => (
-  workflow?.id === 'fold_shirt' || workflow?.id === 'auto_propagate' ? 1200 : FOLD_STEP_BUDGET
-);
+const LONG_PLAN_BUDGETS = { fold_shirt: SHIRT_STEP_BUDGET, auto_propagate: PROPAGATE_STEP_BUDGET };
+const maxPolicyBudget = (workflow = state.currentWorkflow) => LONG_PLAN_BUDGETS[workflow?.id] ?? FOLD_STEP_BUDGET;
 
 const makeArmState = (arm) => ({
   arm,
@@ -1020,6 +1020,26 @@ const SAFETY_COPY = {
   obstacle: 'Blocked at obstacle',
 };
 
+/**
+ * The cell check for the current task. Task 18 adds its bend, self, podium
+ * and module-stack limits and, once assembled, the sibling arm itself; every
+ * other task uses the plain floor/workspace/inter-arm envelope. Telemetry,
+ * the joint sliders and limb dragging all go through this one check.
+ */
+function evaluateTaskCell(poses) {
+  if (state.rigidSpec?.goal?.type !== 'propagate') return evaluateCellSafety(poses, compiled.environment.safety);
+  const { placed, modules = {} } = rigidOutcome(state.rigidSpec, state.rigid);
+  const stacked = !modules.base ? 0 : !modules.link ? 1 : !modules.tool ? 2 : 3;
+  return evaluatePropagateCell(state.rigidSpec, compiled.environment.safety, poses[0], { siblingQ: placed ? siblingQ() : null, stacked });
+}
+
+/** Status copy for a blocked cell, naming the obstacle when there is one. */
+function safetyCopy(reason, check) {
+  if (reason !== 'obstacle') return SAFETY_COPY[reason];
+  const obstacles = { pedestal: 'Blocked at arm pedestal', podium: 'Blocked at sibling podium', assembly: 'Blocked at module stack' };
+  return obstacles[check?.obstacle] || SAFETY_COPY.obstacle;
+}
+
 /** Rigid tasks score the object, not the tool: its distance to the goal, and whether it is placed and at rest. */
 function updateRigidTelemetry() {
   const outcome = rigidOutcome(state.rigidSpec, state.rigid);
@@ -1031,16 +1051,10 @@ function updateRigidTelemetry() {
   const score = outcome.success ? 100 : clamp(90 - outcome.error / 2.7, 0, 90);
   $('#reward-bar').style.width = `${score}%`;
   $('#reward-bar-value').textContent = `${Math.round(score)}%`;
-  const poses = activeArms().map(({ q, arm }) => ({ q, arm }));
-  // Task 18 also holds the arm to its bend, self, podium, and (once the
-  // sibling is assembled) arm-to-arm limits.
-  const actualSafety = isPropagate
-    ? evaluatePropagateCell(state.rigidSpec, compiled.environment.safety, poses[0], { siblingQ: outcome.placed ? siblingQ() : null })
-    : evaluateCellSafety(poses, compiled.environment.safety);
+  const actualSafety = evaluateTaskCell(activeArms().map(({ q, arm }) => ({ q, arm })));
   const reason = state.safetyNotice || actualSafety.reason;
-  const obstacleCopy = { pedestal: 'Blocked at arm pedestal', podium: 'Blocked at sibling podium', assembly: 'Blocked at module stack' };
   $('#safety-state').textContent = reason
-    ? reason === 'obstacle' ? obstacleCopy[actualSafety.obstacle] || 'Blocked at obstacle' : SAFETY_COPY[reason]
+    ? safetyCopy(reason, state.safetyCheck || actualSafety)
     : isPropagate && outcome.success
     ? '6-DOF Sibling Arm installed & online'
     : outcome.held
@@ -1204,6 +1218,7 @@ async function mountViewport3D() {
       workspace: compiled.environment.safety,
       onGoalPick: (point) => setGoalFromScene(point),
       onGoalHeight: setGoalHeight,
+      onLimbDrag: dragLimb,
       // Task 16: a click in 3-D fires along the view ray at whatever it hits.
       onShoot: (target, from) => shootAt(target, from),
     });
@@ -1232,7 +1247,7 @@ async function setViewportMode(mode) {
     setHidden($('#stage-3d'), true);
     setHidden($('#scene'), false);
     setHidden($('#viewport-loader'), true);
-    $('#viewport-hint').textContent = 'Click anywhere in the scene to move the goal.';
+    $('#viewport-hint').textContent = viewportHint();
     return;
   }
 
@@ -1269,7 +1284,7 @@ async function setViewportMode(mode) {
 
     instance.start();
     pushViewportState();
-    $('#viewport-hint').textContent = 'Drag to orbit · scroll to zoom · click the floor to move a goal · drag a cube up or down to change its height.';
+    $('#viewport-hint').textContent = viewportHint();
   } catch (error) {
     if (loader) setHidden(loader, true);
     viewport.failed = true;
@@ -1366,9 +1381,8 @@ function loadWorkflow(id, { scroll = false } = {}) {
   // tail) also outrun a 200-step horizon, and share the same ceiling.
   // Task 17's multi-stage shirt fold needs ~1067 steps to finish all 4 stages.
   const ceiling = maxPolicyBudget(workflow);
-  state.policy.budget = workflow.id === 'fold_shirt' || workflow.id === 'auto_propagate'
-    ? 1200
-    : runsFullPlan(workflow) ? FOLD_STEP_BUDGET : workflow.horizon_steps;
+  state.policy.budget = LONG_PLAN_BUDGETS[workflow.id]
+    ?? (runsFullPlan(workflow) ? FOLD_STEP_BUDGET : workflow.horizon_steps);
   state.policy.loop = isClothFoldTask(workflow);
   $('#policy-loop').checked = state.policy.loop;
   const budgetInput = $('#policy-budget');
@@ -1415,11 +1429,7 @@ function loadWorkflow(id, { scroll = false } = {}) {
   renderTaskDetail();
   updateArms();
   syncSliders();
-  if (workflow.id === 'auto_propagate') {
-    $('#viewport-hint').textContent = 'Drag to orbit · scroll to zoom · click the table to choose the arm deployment area.';
-  } else if (!viewport.failed) {
-    $('#viewport-hint').textContent = 'Drag to orbit · scroll to zoom · click the floor to move a goal · drag a cube up or down to change its height.';
-  }
+  if (!viewport.failed) $('#viewport-hint').textContent = viewportHint();
   if (scroll) $('#demo').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -1674,6 +1684,7 @@ async function runPolicyPlanning(token) {
 
 function startPolicy() {
   if (state.policy.status === HALT.RUNNING || state.policy.planning) return;
+  cancelLimbDrag();
   clearTimeout(state.policy.restart);
   state.policy.restart = null;
   state.policy.planning = true;
@@ -1702,6 +1713,7 @@ function haltPolicy(status = HALT.OPERATOR, { silent = false } = {}) {
 }
 
 function resetArms({ keepRigidSpec = false } = {}) {
+  cancelLimbDrag();
   const workflow = state.currentWorkflow;
   for (const armState of state.arms) {
     armState.q = [...HOME_POSE];
@@ -1921,6 +1933,83 @@ function installListeners() {
   document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => { document.querySelectorAll('.tab,.tab-content').forEach((el) => el.classList.remove('active')); tab.classList.add('active'); $(`#${tab.dataset.tab}`).classList.add('active'); }));
 }
 
+/** What the current view lets the operator do, for the line under the viewport. */
+function viewportHint() {
+  const propagate = state.currentWorkflow?.id === 'auto_propagate';
+  if (viewport.mode !== '3d') return propagate ? 'Click the table to choose the sibling arm podium.' : 'Click anywhere in the scene to move the goal.';
+  return propagate
+    ? 'Drag to orbit · scroll to zoom · click the table to choose the podium · drag an arm link to move that limb.'
+    : 'Drag to orbit · scroll to zoom · click the floor to move a goal · drag a cube up or down to change its height · drag an arm link to move that limb.';
+}
+
+/**
+ * Per-limb interaction from the 3-D viewport.
+ *
+ * Grabbing link i of an arm steers that link's far end toward the pointer
+ * using joints 0..i only; the limbs beyond it ride along unchanged. The
+ * pose does not jump to the pointer: a LimbController eases it there under
+ * the weighted jerk/snap/crackle/pop cascade, one rate-capped tick per
+ * frame, and each tick must pass the task's full cell check (floor, table
+ * edge, other arm, bend, self, pedestal/podium/stack). A limb dragged into
+ * a limit stops against it and says which one.
+ */
+let limbDrag = null;
+
+function dragLimb(armId, limb, point, { committed }) {
+  if (state.policy.status === HALT.RUNNING || state.policy.planning) return;
+  const armState = activeArms().find((candidate) => candidate.arm.id === armId);
+  if (!armState) return;
+  if (!limbDrag || limbDrag.armState !== armState || limbDrag.limb !== limb) {
+    limbDrag = { armState, limb, controller: new LimbController(armState.q, armState.arm), point: null, released: false, frame: null };
+  }
+  if (point) limbDrag.point = point;
+  if (committed) limbDrag.released = true;
+  if (limbDrag.frame === null) limbDrag.frame = requestAnimationFrame(limbFrame);
+}
+
+/** Drop an in-progress limb drag: a policy run or a reset takes the arm over. */
+function cancelLimbDrag() {
+  if (limbDrag?.frame != null) cancelAnimationFrame(limbDrag.frame);
+  limbDrag = null;
+}
+
+function limbFrame() {
+  const drag = limbDrag;
+  if (!drag) return;
+  drag.frame = null;
+  const { armState, controller, limb, point } = drag;
+  // Refine the target one damped IK step per frame from where it already is.
+  if (point && !drag.released) controller.setTarget(limbDragTarget(controller.target, armState.arm, limb, point));
+  const others = activeArms().filter((candidate) => candidate !== armState).map(({ q, arm }) => ({ q, arm }));
+  let check = null;
+  const previous = armState.q;
+  const next = controller.step((q) => {
+    // The dragged arm goes first: Task 18's check treats pose 0 as the primary.
+    check = evaluateTaskCell([{ q, arm: armState.arm }, ...others]);
+    return check.safe;
+  });
+  state.safetyNotice = next ? null : check.reason;
+  state.safetyCheck = next ? null : check;
+  if (next) {
+    armState.q = next;
+    armState.lastAction = next.map((value, joint) => value - previous[joint]);
+    state.step += 1;
+    syncSliders();
+    advanceRigidPhysics();
+    updateArms();
+    addTransition();
+  } else {
+    updateTelemetry();
+  }
+  if (drag.released && (controller.settled || !next)) {
+    limbDrag = null;
+    replanArms();
+    syncSliders();
+    return;
+  }
+  drag.frame = requestAnimationFrame(limbFrame);
+}
+
 function makeSliders() {
   const jointRows = HOME_POSE.map((value, index) => `<label class="slider">${JOINT_LABELS[index]}<input data-joint="${index}" type="range" min="${-jointLimitOf(index)}" max="${jointLimitOf(index)}" step="0.01" value="${value}" aria-label="${index === 0 ? 'Base yaw' : `Joint ${index + 1}`} target"/><output>${fmt(value)}</output></label>`).join('');
   sliders.innerHTML = `${jointRows}<label class="slider goal-z-slider">Goal Z<input id="goal-z" type="range" min="${GOAL_Z.min}" max="${GOAL_Z.max}" step="1" value="${GOAL_Z.rest}" aria-label="Goal height above the table"/><output>${fmt(GOAL_Z.rest / 10, 1)} cm</output></label>`;
@@ -1933,7 +2022,7 @@ function makeSliders() {
     // per-step cap as the policy, so manual operation cannot teleport either.
     candidate[index] = previous + clamp(Number(input.value) - previous, -armState.arm.maxActionDelta, armState.arm.maxActionDelta);
     const candidatePoses = activeArms().map((item) => ({ q: item === armState ? candidate : item.q, arm: item.arm }));
-    const safety = evaluateCellSafety(candidatePoses, compiled.environment.safety);
+    const safety = evaluateTaskCell(candidatePoses);
     if (!safety.safe) {
       state.safetyNotice = safety.reason;
       syncSliders();
