@@ -182,10 +182,11 @@ export class RigidScene {
     this.shotCount = 0;
     this.knocks = 0;
     this.returned = 0;
-    // A live table lets resting bodies sleep: stacked boxes otherwise creep
-    // under solver jitter until a tower walks off its own base. Any contact
-    // with a moving body (a ball, a finger) wakes them.
-    this.world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.81, 0), allowSleep: Boolean(spec.live) });
+    // A live table, and a module stack built on a podium (Task 18), let
+    // resting bodies sleep: stacked boxes otherwise creep under solver
+    // jitter until a tower walks off its own base. Any contact with a
+    // moving body (a ball, a finger) wakes them.
+    this.world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.81, 0), allowSleep: Boolean(spec.live || spec.goal?.podium) });
     this.world.solver.iterations = 20;
     this.world.defaultContactMaterial.friction = 0.6;
     this.world.defaultContactMaterial.restitution = 0.05;

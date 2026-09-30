@@ -908,7 +908,7 @@
             "shape": "box",
             "size": 30,
             "position": [
-              460,
+              450,
               165
             ],
             "yaw": 0,
@@ -921,8 +921,8 @@
             "shape": "box",
             "size": 26,
             "position": [
-              420,
-              160
+              400,
+              165
             ],
             "yaw": 0,
             "mass": 0.06,
@@ -934,7 +934,7 @@
             "shape": "box",
             "size": 22,
             "position": [
-              380,
+              350,
               165
             ],
             "yaw": 0,
@@ -947,11 +947,11 @@
             "id": "depot",
             "type": "tray",
             "position": [
-              420,
+              400,
               165
             ],
             "inner": [
-              130,
+              170,
               50
             ],
             "wall": 4,
@@ -975,7 +975,8 @@
         "constraints": {
           "bend_limit_rad": 1.65,
           "self_clearance_px": 40,
-          "obstacle_clearance_px": 6
+          "obstacle_clearance_px": 6,
+          "singularity_margin": 0.02
         }
       }
     }
