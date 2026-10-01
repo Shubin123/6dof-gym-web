@@ -23,7 +23,7 @@
     "test:coverage": "node --test --experimental-test-coverage"
   },
   "devDependencies": {
-    "vite": "^8.3.0"
+    "vite": "^8.3.1"
   },
   "dependencies": {
     "cannon-es": "^0.20.0",
