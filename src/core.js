@@ -8,41 +8,64 @@
  */
 /**
  * The arm's physical body, in scene px: what the 3-D view draws and what the
- * interference check tests. Each link is a rounded capsule of radius
- * linkRadius[i], tapering from shoulder to wrist, that ends at the surface
- * of its joint housings rather than at the joint centre; each joint i is a
- * housing - a cylinder of radius housingRadius[i] and half-length
- * housingRadius[i] * housingAspect along its rotation axis - that the links
- * either side of it turn around. `clearance` is the gap two parts that are
- * not bolted together must always keep.
+ * interference check tests. It is laid out like a real collaborative arm.
+ *
+ * Every joint is a cylindrical housing on its rotation axis. The link coming
+ * into joint j bolts onto one end of that housing and the link going out
+ * onto the other, `jointOffset[j]` either side of the joint along the axis
+ * (`polarity[j]` picks which side is which). Both links are perpendicular to
+ * the axis, so they lie in parallel planes 2 * jointOffset[j] apart, and
+ * with that gap wider than their two radii plus `clearance` they cannot
+ * touch however far the joint turns. J2 and J3 turn about parallel axes, so
+ * their polarities alternate, as on a real elbow. Each link is a straight
+ * tube of linkRadius[i] carried at those offsets; the last one stays in its
+ * plane until a short bracket at the tool flange steps it back onto the
+ * kinematic centre line, where the gripper is. The kinematic chain is unchanged: the
+ * offsets move the bodies, not the joint axes or the tool tip.
  */
 export const ARM_BODY = Object.freeze({
   linkRadius: Object.freeze([9, 8, 7, 6, 5.5, 5]),
-  housingRadius: Object.freeze([15, 13.5, 12, 10.5, 9.5, 9]),
-  housingAspect: 0.75,
+  jointOffset: Object.freeze([10, 10.5, 10.5, 8.5, 8, 7.5]),
+  polarity: Object.freeze([1, 1, -1, 1, 1, 1]),
+  // Big enough to take both offset links' ends, as a real joint casing does.
+  housingRadius: Object.freeze([20.5, 20, 16.5, 18.5, 15.5, 14.5]),
+  housingHalfLength: Object.freeze([20, 20.5, 19.5, 16.5, 15, 14]),
+  /** Length of the bracket that steps the tool link back onto the tool's centre line. */
+  toolBracket: 14,
   clearance: 2,
 });
 
+const bodyLimitCache = new WeakMap();
+
 /**
- * Per-joint limits that keep the links either side of every joint apart,
- * with `clearance` to spare. (With the shapes above, even the 1.7 rad hard
- * stop leaves adjacent parts about a pixel apart; a task that enforces
- * limb_interference keeps the full clearance.)
- *
- * At joint k the two links' near ends sit housingRadius[k] from the joint,
- * so with an angle phi between the links those ends are 2 R sin(phi / 2)
- * apart and must clear r[k-1] + r[k] + clearance. Every articulated joint
- * turns about an axis perpendicular to its link, so the bend is exactly |q|
- * and the limit is pi - phi_min. Joint 0 is the base yaw, which bends
- * nothing, and keeps its full swing.
+ * Per-joint limits that keep every part of the arm apart: for each joint,
+ * the furthest it can turn either way from the straight arm before any two
+ * unbolted parts come within `clearance`, capped at the hard stop. With the
+ * offset layout neighbouring links never meet, so this is the hard stop
+ * unless a housing or a farther limb gets in the way. Joint 0 is the base
+ * yaw, which bends nothing, and keeps its full swing.
  */
 export function jointLimitsForBody(body = ARM_BODY, { yawLimit = Math.PI, hardStop = 1.7 } = {}) {
-  const r = body.linkRadius;
-  return Object.freeze(body.housingRadius.map((housing, k) => {
+  if (bodyLimitCache.has(body)) return bodyLimitCache.get(body);
+  const limits = Object.freeze(body.linkRadius.map((_, k) => {
     if (k === 0) return yawLimit;
-    const phiMin = 2 * Math.asin(Math.min(1, (r[k - 1] + r[k] + body.clearance) / (2 * housing)));
-    return Math.min(hardStop, Math.PI - phiMin);
+    const clear = (angle) => [-1, 1].every((sign) => {
+      const q = Array(body.linkRadius.length).fill(0);
+      q[k] = sign * angle;
+      return limbInterference(q, ARM, body) >= -1e-9;
+    });
+    if (clear(hardStop)) return hardStop;
+    let low = 0;
+    let high = hardStop;
+    for (let i = 0; i < 40; i += 1) {
+      const mid = (low + high) / 2;
+      if (clear(mid)) low = mid;
+      else high = mid;
+    }
+    return low;
   }));
+  bodyLimitCache.set(body, limits);
+  return limits;
 }
 
 export const ARM = Object.freeze({
@@ -199,29 +222,47 @@ export function linkBendAngles(points) {
 }
 
 /**
- * The arm's solid parts at pose q, as capsules { a, b, radius, kind, index }:
- * a link runs between its two housings' surfaces, a housing lies along its
- * joint axis. Joint 0's housing sits on the column, at the chain's base.
+ * The arm's solid parts at pose q, as capsules { a, b, radius, kind, index }.
+ * Link i is a tube shifted off its joint-to-joint centre line by an offset
+ * that puts it on its side of both housings (see ARM_BODY); housing k lies
+ * along joint k's axis.
  */
 export function armBodies(q, arm = ARM, body = ARM_BODY) {
   const { points, axes } = forwardKinematics(q, arm);
+  const n = points.length - 1;
+  const side = (j) => body.polarity[j] * body.jointOffset[j];
   const parts = [];
-  for (let i = 0; i < points.length - 1; i += 1) {
-    const dir = unit(sub(points[i + 1], points[i]));
-    const start = add(points[i], dir, body.housingRadius[i]);
-    // The last link carries the tool out to the tip: no housing at its end.
-    const end = i + 1 < body.housingRadius.length ? add(points[i + 1], dir, -body.housingRadius[i + 1]) : points[i + 1];
-    parts.push({ kind: 'link', index: i, a: start, b: end, radius: body.linkRadius[i] });
+  for (let i = 0; i < n; i += 1) {
+    // Outgoing at joint i: +side(i) along its axis.
+    const out = axes[i].map((value) => value * side(i));
+    if (i === n - 1) {
+      // The tool link stays in its plane, then a bracket at the flange
+      // steps it back onto the tool's centre line.
+      const dir = unit(sub(points[i + 1], points[i]));
+      const flange = add(add(points[i + 1], out), dir, -body.toolBracket);
+      parts.push({ kind: 'link', index: i, a: add(points[i], out), b: flange, radius: body.linkRadius[i] });
+      parts.push({ kind: 'link', index: i, a: flange, b: add(points[i + 1], dir, -body.toolBracket), radius: body.linkRadius[i] });
+      continue;
+    }
+    // Incoming at joint i + 1: -side(i + 1) along that axis. Parallel axes
+    // already agree (their polarities alternate); perpendicular ones add.
+    const parallel = Math.abs(dot(axes[i], axes[i + 1])) > 0.99;
+    const shift = parallel ? out : add(out, axes[i + 1], -side(i + 1));
+    parts.push({ kind: 'link', index: i, a: add(points[i], shift), b: add(points[i + 1], shift), radius: body.linkRadius[i] });
   }
   body.housingRadius.forEach((radius, k) => {
-    const half = radius * body.housingAspect;
-    parts.push({ kind: 'housing', index: k, a: add(points[k], axes[k], -half), b: add(points[k], axes[k], half), radius });
+    const half = body.housingHalfLength[k] - radius;
+    // A capsule round the housing cylinder: its axis segment, inset so the
+    // rounded ends stay within the cylinder's flat faces where possible.
+    parts.push({ kind: 'housing', index: k, a: add(points[k], axes[k], -Math.max(0, half)), b: add(points[k], axes[k], Math.max(0, half)), radius });
   });
   return parts;
 }
 
 /** Link i is bolted to housings i and i + 1; any other pair of parts must keep clear. */
 const bolted = (p, q) => {
+  // Pieces of one link are one rigid part.
+  if (p.kind === 'link' && q.kind === 'link') return p.index === q.index;
   if (p.kind === q.kind) return false;
   const link = p.kind === 'link' ? p : q;
   const housing = p.kind === 'link' ? q : p;

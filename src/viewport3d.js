@@ -12,7 +12,7 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { ARM, ARM_B, ARM_BODY, clamp, forwardKinematics, GOAL_Z } from './core.js';
+import { ARM, ARM_B, ARM_BODY, armBodies, clamp, forwardKinematics, GOAL_Z, HOME_POSE } from './core.js';
 import { ClothSimulator } from './cloth.js';
 import { getShirtMeshInfo } from './shirt-fold.js';
 import { FOLD_GUIDE } from './fold-guide.js';
@@ -101,39 +101,41 @@ function makeArm(arm) {
   column.receiveShadow = true;
   group.add(column);
 
-  // The body is core.js's ARM_BODY, the same shapes the interference check
-  // tests: rounded links that stop at their housings' surfaces, and
-  // cylindrical housings along each joint's axis that the links turn around.
+  // The body is core.js's armBodies - the same parts the interference check
+  // tests, laid out like a real collaborative arm: each link a tube carried
+  // to one side of its joint housings, each housing a cylinder on its axis.
+  // links[i] is link i's main tube; caps holds every other piece of link i
+  // (its rounded ends and, on the tool link, the flange bracket).
   const links = [];
-  const caps = [];
+  const caps = arm.lengths.map(() => []);
   const joints = [];
-  for (let i = 0; i < arm.lengths.length; i += 1) {
-    const radius = ARM_BODY.linkRadius[i] / PX;
-    // Each link owns its material, so a grabbed limb can light up on its own.
-    const material = (i % 2 ? accentMaterial : linkMaterial).clone();
-    // A unit-height body along +Y, stretched between its housings at layout
-    // time and narrowing a little toward the tool; rounded caps close each end.
-    const link = new THREE.Mesh(new THREE.CylinderGeometry(radius * 0.88, radius, 1, 20), material);
-    link.userData.limb = i;
-    link.castShadow = true;
-    link.receiveShadow = true;
-    group.add(link);
-    links.push(link);
-    caps.push([radius, radius * 0.88].map((r) => {
-      const cap = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 10), material);
-      cap.userData.limb = i;
-      cap.castShadow = true;
-      group.add(cap);
-      return cap;
-    }));
-
-    const housingRadius = ARM_BODY.housingRadius[i] / PX;
-    const joint = new THREE.Mesh(new THREE.CylinderGeometry(housingRadius, housingRadius, 2 * housingRadius * ARM_BODY.housingAspect, 28), jointMaterial);
-    // Joint i sits at the start of link i: grabbing it moves the limb before it.
-    joint.userData.limb = Math.max(0, i - 1);
-    joint.castShadow = true;
-    group.add(joint);
-    joints.push(joint);
+  const pieces = [];
+  const materials = arm.lengths.map((_, i) => (i % 2 ? accentMaterial : linkMaterial).clone());
+  const piece = (geometry, material, limb) => {
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.userData.limb = limb;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+    return mesh;
+  };
+  for (const part of armBodies(HOME_POSE, arm)) {
+    const radius = part.radius / PX;
+    if (part.kind === 'link') {
+      // Each link owns its material, so a grabbed limb can light up on its own.
+      const material = materials[part.index];
+      const tube = piece(new THREE.CylinderGeometry(radius, radius, 1, 20), material, part.index);
+      const ends = [0, 1].map(() => piece(new THREE.SphereGeometry(radius, 16, 10), material, part.index));
+      if (!links[part.index]) links[part.index] = tube;
+      else caps[part.index].push(tube);
+      caps[part.index].push(...ends);
+      pieces.push({ tube, ends });
+    } else {
+      const length = 2 * ARM_BODY.housingHalfLength[part.index] / PX;
+      const joint = piece(new THREE.CylinderGeometry(radius, radius, length, 32), jointMaterial, Math.max(0, part.index - 1));
+      // Joint i sits at the start of link i: grabbing it moves the limb before it.
+      joints.push(joint);
+    }
   }
 
   // The tool frame's origin is the kinematic tip - the grasp point - with +x
@@ -155,7 +157,7 @@ function makeArm(arm) {
   tool.add(wrist);
   group.add(tool);
 
-  return { arm, group, links, caps, joints, tool, fingers, column };
+  return { arm, group, links, caps, joints, pieces, tool, fingers, column };
 }
 
 function makeGoal(mirrored) {
@@ -926,24 +928,23 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
   function layoutArm(rig, armState) {
     const { points, forward, axes } = forwardKinematics(armState.q, rig.arm);
     const world = points.map((point) => toWorld(point));
-    const housing = (i) => (i < ARM_BODY.housingRadius.length ? ARM_BODY.housingRadius[i] / PX : 0);
-
-    for (let i = 0; i < rig.links.length; i += 1) {
-      const dir = new THREE.Vector3().subVectors(world[i + 1], world[i]).normalize();
-      // The link runs between its housings' surfaces, not joint centre to centre.
-      const from = world[i].clone().addScaledVector(dir, housing(i));
-      const to = world[i + 1].clone().addScaledVector(dir, -housing(i + 1));
-      const link = rig.links[i];
-      link.position.copy(from).lerp(to, 0.5);
-      link.scale.y = Math.max(from.distanceTo(to), 0.001);
-      link.quaternion.setFromUnitVectors(UP, dir);
-      rig.caps[i][0].position.copy(from);
-      rig.caps[i][1].position.copy(to);
-      // The housing lies along the joint's rotation axis (scene -> world swaps y and z).
-      const [ax, ay, az] = axes[i];
-      rig.joints[i].position.copy(world[i]);
-      rig.joints[i].quaternion.setFromUnitVectors(UP, new THREE.Vector3(ax, az, ay).normalize());
-    }
+    // Scene vectors to world ones: x stays, y and z swap.
+    const toWorldDir = ([x, y, z]) => new THREE.Vector3(x, z, y).normalize();
+    const parts = armBodies(armState.q, rig.arm);
+    parts.filter((part) => part.kind === 'link').forEach((part, i) => {
+      const { tube, ends } = rig.pieces[i];
+      const a = toWorld(part.a);
+      const b = toWorld(part.b);
+      tube.position.copy(a).lerp(b, 0.5);
+      tube.scale.y = Math.max(a.distanceTo(b), 0.001);
+      tube.quaternion.setFromUnitVectors(UP, new THREE.Vector3().subVectors(b, a).normalize());
+      ends[0].position.copy(a);
+      ends[1].position.copy(b);
+    });
+    rig.joints.forEach((joint, k) => {
+      joint.position.copy(world[k]);
+      joint.quaternion.setFromUnitVectors(UP, toWorldDir(axes[k]));
+    });
 
     const tip = world.at(-1);
     rig.tool.position.copy(tip);
