@@ -81,7 +81,7 @@ test('LimbController stops against a constraint instead of passing it', () => {
   const cell = propagateSafety(task.rigid, safety);
   const controller = new LimbController(HOME_POSE, ARM);
   const target = [...HOME_POSE];
-  target[2] = 1.7; // past the 1.65 rad bend limit
+  target[2] = 1.7; // past joint 2's bend limit
   controller.setTarget(target);
   let blocked = false;
   for (let tick = 0; tick < 400; tick += 1) {
@@ -90,7 +90,7 @@ test('LimbController stops against a constraint instead of passing it', () => {
   }
   assert.ok(blocked, 'the bend limit halts the limb');
   assert.equal(evaluateCellSafety([{ q: controller.q, arm: ARM }], cell).safe, true, 'the arm is left on a safe pose');
-  assert.ok(controller.q[2] <= 1.65 + 1e-9);
+  assert.ok(controller.q[2] <= cell.bend_limit_rad[1] + 1e-9);
 });
 
 test('limbDragTarget moves only the joints up to the grabbed limb', () => {

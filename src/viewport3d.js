@@ -12,7 +12,7 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { ARM, ARM_B, clamp, forwardKinematics, GOAL_Z } from './core.js';
+import { ARM, ARM_B, ARM_BODY, clamp, forwardKinematics, GOAL_Z } from './core.js';
 import { ClothSimulator } from './cloth.js';
 import { getShirtMeshInfo } from './shirt-fold.js';
 import { FOLD_GUIDE } from './fold-guide.js';
@@ -101,20 +101,34 @@ function makeArm(arm) {
   column.receiveShadow = true;
   group.add(column);
 
+  // The body is core.js's ARM_BODY, the same shapes the interference check
+  // tests: rounded links that stop at their housings' surfaces, and
+  // cylindrical housings along each joint's axis that the links turn around.
   const links = [];
+  const caps = [];
   const joints = [];
   for (let i = 0; i < arm.lengths.length; i += 1) {
-    const thickness = 0.2 - i * 0.017;
-    // A unit-length bar along +Y, rotated onto each 3-D segment at layout time.
+    const radius = ARM_BODY.linkRadius[i] / PX;
     // Each link owns its material, so a grabbed limb can light up on its own.
-    const link = new THREE.Mesh(new THREE.BoxGeometry(thickness, 1, thickness * 1.15), (i % 2 ? accentMaterial : linkMaterial).clone());
+    const material = (i % 2 ? accentMaterial : linkMaterial).clone();
+    // A unit-height body along +Y, stretched between its housings at layout
+    // time and narrowing a little toward the tool; rounded caps close each end.
+    const link = new THREE.Mesh(new THREE.CylinderGeometry(radius * 0.88, radius, 1, 20), material);
     link.userData.limb = i;
     link.castShadow = true;
     link.receiveShadow = true;
     group.add(link);
     links.push(link);
+    caps.push([radius, radius * 0.88].map((r) => {
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 10), material);
+      cap.userData.limb = i;
+      cap.castShadow = true;
+      group.add(cap);
+      return cap;
+    }));
 
-    const joint = new THREE.Mesh(new THREE.SphereGeometry(thickness * 0.66, 18, 12), jointMaterial);
+    const housingRadius = ARM_BODY.housingRadius[i] / PX;
+    const joint = new THREE.Mesh(new THREE.CylinderGeometry(housingRadius, housingRadius, 2 * housingRadius * ARM_BODY.housingAspect, 28), jointMaterial);
     // Joint i sits at the start of link i: grabbing it moves the limb before it.
     joint.userData.limb = Math.max(0, i - 1);
     joint.castShadow = true;
@@ -141,7 +155,7 @@ function makeArm(arm) {
   tool.add(wrist);
   group.add(tool);
 
-  return { arm, group, links, joints, tool, fingers, column };
+  return { arm, group, links, caps, joints, tool, fingers, column };
 }
 
 function makeGoal(mirrored) {
@@ -391,6 +405,7 @@ function makeRigidScene(spec) {
     siblingRig = makeArm(siblingArmAt(spec.goal.position));
     siblingRig.column.visible = false; // podiumGroup renders the identical full-sized column
     siblingRig.links.forEach((l) => { l.visible = false; });
+    siblingRig.caps.flat().forEach((c) => { c.visible = false; });
     siblingRig.joints.forEach((j) => { j.visible = false; });
     siblingRig.tool.visible = false;
     group.add(siblingRig.group);
@@ -635,10 +650,10 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
   const pickLimb = (event) => {
     setPointer(event);
     const active = rigs.filter((rig) => rig.group.visible);
-    const meshes = active.flatMap((rig) => [...rig.links, ...rig.joints]);
-    const [first] = raycaster.intersectObjects(meshes, false);
+    const parts = (rig) => [...rig.links, ...rig.caps.flat(), ...rig.joints];
+    const [first] = raycaster.intersectObjects(active.flatMap(parts), false);
     if (!first) return null;
-    const rig = active.find((candidate) => candidate.links.includes(first.object) || candidate.joints.includes(first.object));
+    const rig = active.find((candidate) => parts(candidate).includes(first.object));
     return { rig, limb: first.object.userData.limb, point: first.point.clone() };
   };
 
@@ -660,7 +675,9 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
       const hit = pickLimb(event);
       if (!hit) return;
       // Drag the limb's far end, keeping the grab offset so it does not jump.
-      const end = hit.rig.links[hit.limb].localToWorld(new THREE.Vector3(0, 0.5, 0));
+      // The kinematic far end: the next joint's centre, or the tool tip.
+      const next = hit.rig.joints[hit.limb + 1] || hit.rig.tool;
+      const end = next.getWorldPosition(new THREE.Vector3());
       drag = { limb: hit, offset: new THREE.Vector3().subVectors(hit.point, end), origin: hit.point.clone() };
       controls.enabled = false;
       lightLimb(hit);
@@ -820,6 +837,7 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
       const toolPlaced = linkPlaced && distTool < 40;
 
       rigid.siblingRig.links.forEach((l) => { l.visible = linkPlaced; });
+      rigid.siblingRig.caps.flat().forEach((c) => { c.visible = linkPlaced; });
       rigid.siblingRig.joints.forEach((j) => { j.visible = linkPlaced; });
       rigid.siblingRig.tool.visible = toolPlaced;
 
@@ -841,7 +859,7 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
    * in from the camera's side and lands where the operator clicked.
    */
   const shoot = () => {
-    const targets = [...(rigid ? rigid.meshes.values() : []), ...rigs.flatMap((rig) => (rig.group.visible ? [...rig.links, ...rig.joints] : []))];
+    const targets = [...(rigid ? rigid.meshes.values() : []), ...rigs.flatMap((rig) => (rig.group.visible ? [...rig.links, ...rig.caps.flat(), ...rig.joints] : []))];
     const [first] = raycaster.intersectObjects(targets, false);
     const point = first ? first.point : (raycaster.ray.intersectPlane(floorPlane, hit) ? hit.clone() : null);
     if (!point) return;
@@ -906,19 +924,25 @@ export function createViewport3D(container, { workspace, onGoalPick, onGoalHeigh
   }
 
   function layoutArm(rig, armState) {
-    const { points, forward } = forwardKinematics(armState.q, rig.arm);
+    const { points, forward, axes } = forwardKinematics(armState.q, rig.arm);
     const world = points.map((point) => toWorld(point));
+    const housing = (i) => (i < ARM_BODY.housingRadius.length ? ARM_BODY.housingRadius[i] / PX : 0);
 
     for (let i = 0; i < rig.links.length; i += 1) {
-      const from = world[i];
-      const to = world[i + 1];
+      const dir = new THREE.Vector3().subVectors(world[i + 1], world[i]).normalize();
+      // The link runs between its housings' surfaces, not joint centre to centre.
+      const from = world[i].clone().addScaledVector(dir, housing(i));
+      const to = world[i + 1].clone().addScaledVector(dir, -housing(i + 1));
       const link = rig.links[i];
-      const span = new THREE.Vector3().subVectors(to, from);
-      const length = Math.max(span.length(), 0.001);
       link.position.copy(from).lerp(to, 0.5);
-      link.scale.y = length;
-      link.quaternion.setFromUnitVectors(UP, span.normalize());
-      rig.joints[i].position.copy(from);
+      link.scale.y = Math.max(from.distanceTo(to), 0.001);
+      link.quaternion.setFromUnitVectors(UP, dir);
+      rig.caps[i][0].position.copy(from);
+      rig.caps[i][1].position.copy(to);
+      // The housing lies along the joint's rotation axis (scene -> world swaps y and z).
+      const [ax, ay, az] = axes[i];
+      rig.joints[i].position.copy(world[i]);
+      rig.joints[i].quaternion.setFromUnitVectors(UP, new THREE.Vector3(ax, az, ay).normalize());
     }
 
     const tip = world.at(-1);

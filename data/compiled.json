@@ -921,7 +921,7 @@
             "shape": "box",
             "size": 26,
             "position": [
-              400,
+              405,
               165
             ],
             "yaw": 0,
@@ -934,7 +934,7 @@
             "shape": "box",
             "size": 22,
             "position": [
-              350,
+              360,
               165
             ],
             "yaw": 0,
@@ -947,7 +947,7 @@
             "id": "depot",
             "type": "tray",
             "position": [
-              400,
+              405,
               165
             ],
             "inner": [
@@ -976,7 +976,8 @@
           "bend_limit_rad": 1.65,
           "self_clearance_px": 40,
           "obstacle_clearance_px": 6,
-          "singularity_margin": 0.02
+          "singularity_margin": 0.02,
+          "limb_interference": true
         }
       }
     }
