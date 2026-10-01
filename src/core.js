@@ -18,17 +18,20 @@
  * with that gap wider than their two radii plus `clearance` they cannot
  * touch however far the joint turns. J2 and J3 turn about parallel axes, so
  * their polarities alternate, as on a real elbow. Each link is a straight
- * tube of linkRadius[i] carried at those offsets; the last one runs to the
- * tool on the kinematic centre line. The kinematic chain is unchanged: the
+ * tube of linkRadius[i] carried at those offsets; the last one stays in its
+ * plane until a short bracket at the tool flange steps it back onto the
+ * kinematic centre line, where the gripper is. The kinematic chain is unchanged: the
  * offsets move the bodies, not the joint axes or the tool tip.
  */
 export const ARM_BODY = Object.freeze({
   linkRadius: Object.freeze([9, 8, 7, 6, 5.5, 5]),
-  jointOffset: Object.freeze([10, 9.5, 9.5, 7.5, 7, 6.5]),
+  jointOffset: Object.freeze([10, 10.5, 10.5, 8.5, 8, 7.5]),
   polarity: Object.freeze([1, 1, -1, 1, 1, 1]),
   // Big enough to take both offset links' ends, as a real joint casing does.
-  housingRadius: Object.freeze([19.5, 18, 15.5, 17.5, 14.5, 13.5]),
-  housingHalfLength: Object.freeze([20, 19.5, 18.5, 15.5, 14, 13]),
+  housingRadius: Object.freeze([20.5, 20, 16.5, 18.5, 15.5, 14.5]),
+  housingHalfLength: Object.freeze([20, 20.5, 19.5, 16.5, 15, 14]),
+  /** Length of the bracket that steps the tool link back onto the tool's centre line. */
+  toolBracket: 14,
   clearance: 2,
 });
 
@@ -233,8 +236,12 @@ export function armBodies(q, arm = ARM, body = ARM_BODY) {
     // Outgoing at joint i: +side(i) along its axis.
     const out = axes[i].map((value) => value * side(i));
     if (i === n - 1) {
-      // The tool link runs from its housing side to the tip, on the tool's centre line.
-      parts.push({ kind: 'link', index: i, a: add(points[i], out), b: points[i + 1], radius: body.linkRadius[i] });
+      // The tool link stays in its plane, then a bracket at the flange
+      // steps it back onto the tool's centre line.
+      const dir = unit(sub(points[i + 1], points[i]));
+      const flange = add(add(points[i + 1], out), dir, -body.toolBracket);
+      parts.push({ kind: 'link', index: i, a: add(points[i], out), b: flange, radius: body.linkRadius[i] });
+      parts.push({ kind: 'link', index: i, a: flange, b: add(points[i + 1], dir, -body.toolBracket), radius: body.linkRadius[i] });
       continue;
     }
     // Incoming at joint i + 1: -side(i + 1) along that axis. Parallel axes
@@ -254,6 +261,8 @@ export function armBodies(q, arm = ARM, body = ARM_BODY) {
 
 /** Link i is bolted to housings i and i + 1; any other pair of parts must keep clear. */
 const bolted = (p, q) => {
+  // Pieces of one link are one rigid part.
+  if (p.kind === 'link' && q.kind === 'link') return p.index === q.index;
   if (p.kind === q.kind) return false;
   const link = p.kind === 'link' ? p : q;
   const housing = p.kind === 'link' ? q : p;

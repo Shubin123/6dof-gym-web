@@ -282,39 +282,44 @@ test('Task 18 rejects near-singular poses and its whole plan stays clear of them
   assert.ok(worst >= margin, `primary comes within ${worst} of a singularity`);
 });
 
-test('Joint limits follow from the link and housing shapes, so limbs never touch at a bend', () => {
-  const limits = jointLimitsForBody();
-  assert.equal(limits[0], Math.PI, 'base yaw bends nothing');
+test('Offset links: neighbouring limbs sit in separate planes and never touch at any bend', () => {
+  const { linkRadius, jointOffset, clearance } = ARM_BODY;
+  // At every joint the two links are 2 * offset apart along its axis: more
+  // than their radii plus the clearance, whatever the angle.
   for (let k = 1; k < 6; k += 1) {
-    assert.ok(limits[k] < ARM.jointLimit && limits[k] > 1.4, `joint ${k} limit ${limits[k]}`);
-    const at = (angle) => { const q = [0, 0, 0, 0, 0, 0]; q[k] = angle; return limbInterference(q, ARM); };
-    assert.ok(Math.abs(at(limits[k])) < 1e-6, `joint ${k}: parts just keep their clearance at the limit`);
-    assert.ok(at(limits[k] + 0.05) < 0, `joint ${k}: parts collide past the limit`);
-    // Even the 1.7 rad hard stop leaves neighbouring parts apart (no clearance asked).
-    const q = [0, 0, 0, 0, 0, 0];
-    q[k] = ARM.jointLimit;
-    assert.ok(limbInterference(q, ARM, { ...ARM_BODY, clearance: 0 }) > 0, `joint ${k}: no overlap at the hard stop`);
+    assert.ok(2 * jointOffset[k] >= linkRadius[k - 1] + linkRadius[k] + clearance, `joint ${k} offset`);
   }
-  // The home pose fits the tighter limits.
-  HOME_POSE.forEach((value, joint) => assert.ok(Math.abs(value) <= limits[joint]));
-  assert.ok(limbInterference(HOME_POSE, ARM) >= 0);
-  // Bodies: six links ending at housing surfaces, six housings along joint axes.
-  const parts = armBodies(HOME_POSE, ARM);
-  assert.equal(parts.filter((p) => p.kind === 'link').length, 6);
-  assert.equal(parts.filter((p) => p.kind === 'housing').length, 6);
+  for (const base of [[0, 0, 0, 0, 0, 0], [...HOME_POSE], [0.3, 0.8, 1.0, -0.6, 1.2, 0.4]]) {
+    for (let k = 1; k < 6; k += 1) {
+      for (let angle = -ARM.jointLimit; angle <= ARM.jointLimit + 1e-9; angle += 0.05) {
+        const q = [...base];
+        q[k] = angle;
+        assert.ok(limbInterference(q, ARM) >= 0, `joint ${k} at ${angle.toFixed(2)} from ${base}`);
+      }
+    }
+  }
+  // So the shape no longer caps any joint below its hard stop.
+  jointLimitsForBody().slice(1).forEach((limit) => assert.equal(limit, ARM.jointLimit));
+  // Without the offsets, the same links would run into each other at a sharp bend.
+  const flat = { ...ARM_BODY, jointOffset: [0, 0, 0, 0, 0, 0] };
+  assert.ok(limbInterference([0, 0, 1.6, 0, 0, 0], ARM, flat) < 0);
+  assert.ok(jointLimitsForBody(flat)[2] < ARM.jointLimit);
+  // The kinematics are untouched: the tool link's bracket ends on the tip.
+  const tip = forwardKinematics(HOME_POSE, ARM).points.at(-1);
+  const toolPieces = armBodies(HOME_POSE, ARM).filter((p) => p.kind === 'link' && p.index === 5);
+  assert.equal(toolPieces.length, 2, 'tool tube plus flange bracket');
+  const dir = forwardKinematics(HOME_POSE, ARM).points.at(-2);
+  assert.ok(Math.hypot(...toolPieces[1].b.map((v, i) => v - (tip[i] + (dir[i] - tip[i]) * (ARM_BODY.toolBracket / ARM.lengths[5])))) < 1e-9);
 });
 
 test('Task 18 enforces limb interference on every frame of both arms', () => {
   const cell = propagateSafety(task.rigid, safety);
   assert.equal(cell.limb_interference, true);
   cell.bend_limit_rad.forEach((limit, i) => assert.ok(limit <= jointLimitsForBody()[i + 1] + 1e-12));
-  // Inside the old flat 1.65 rad limit but past joint 2's shape limit: the
-  // boom and forearm would touch, and only the interference check sees it.
-  const pinched = [0, 0, 1.62, 0, 0, 0];
-  assert.equal(evaluateCellSafety([{ q: pinched, arm: ARM }], { bend_limit_rad: 1.65 }).safe, true);
-  assert.equal(evaluateCellSafety([{ q: pinched, arm: ARM }], { limb_interference: true }).reason, 'interference');
-  // Hard folds across several joints, each within its limit, stay clear.
+  // Hard folds across several joints stay clear; a body that does touch is reported.
   assert.equal(evaluateCellSafety([{ q: [0, 1.5, 1.5, 1.5, 1.5, 1.5], arm: ARM }], { limb_interference: true }).safe, true);
+  const fatter = { ...ARM_BODY, linkRadius: ARM_BODY.linkRadius.map((r) => r * 2) };
+  assert.ok(limbInterference(HOME_POSE, ARM, fatter) < 0);
 
   const scene = new RigidScene(task.rigid, { arms: 1 });
   const plan = planAutoPropagateTask(task.rigid, scene, { q: [...HOME_POSE], arm: ARM }, safety);
