@@ -10,7 +10,10 @@
  * so the modules are seated on its top face and every frame of both arms is
  * checked against the task's physical constraints:
  *
- *   bend        no joint folds its links past `bend_limit_rad`
+ *   bend        no joint folds its links past `bend_limit_rad`, or past
+ *               what the arm's link and housing shapes leave room for
+ *   interference no limb or joint housing touches another part of the
+ *               same arm that it is not bolted to
  *   self        no arm folds back into its own non-adjacent links
  *   podium      no link enters the sibling podium, the growing module stack
  *               on it, or the primary arm's pedestal
@@ -23,7 +26,7 @@
  * pop cost (limb-dynamics.js), and every smoothed frame is re-verified
  * against the same constraints before it replaces the original.
  */
-import { ARM, clamp, evaluateCellSafety, forwardKinematics, planSafeMotion } from './core.js';
+import { ARM, clamp, evaluateCellSafety, forwardKinematics, jointLimitsForBody, limitOf, planSafeMotion } from './core.js';
 import { KINEMATIC_WEIGHTS, smoothJointPath } from './limb-dynamics.js';
 import { planPickPlaceMotion, TOOL_DOWN_TOLERANCE, toolDownError } from './rigid-plan.js';
 
@@ -38,11 +41,11 @@ const ASSEMBLY_EASE = Object.freeze({ radius: 5, floor: 0.5, turn: 0.5 });
 
 /** Bounding box of verified safe, collision-free deployment coordinates. */
 export const PROPAGATE_BUILD_WORKSPACE = Object.freeze({
-  minX: 430,
+  minX: 440,
   maxX: 460,
   // The podium's 42 mm floor flange must clear the depot tray's front wall.
   minY: 250,
-  maxY: 305,
+  maxY: 300,
 });
 
 /** Mounting podium: the same column the primary arm stands on. */
@@ -54,7 +57,22 @@ export const PROPAGATE_CONSTRAINTS = Object.freeze({
   self_clearance_px: 40,
   obstacle_clearance_px: 6,
   singularity_margin: 0.02,
+  limb_interference: true,
 });
+
+/**
+ * Per-joint bend limit, joints 1..5: the task's bend_limit_rad, tightened
+ * where the arm's own shape (ARM_BODY) needs more room for its links to
+ * clear each other at the bend.
+ */
+export function bendLimits(rigid) {
+  const constraints = { ...PROPAGATE_CONSTRAINTS, ...(rigid.constraints || {}) };
+  const body = constraints.limb_interference ? jointLimitsForBody() : null;
+  return ARM.lengths.slice(1).map((_, i) => {
+    const bend = Array.isArray(constraints.bend_limit_rad) ? constraints.bend_limit_rad[i] : constraints.bend_limit_rad;
+    return body ? Math.min(bend, body[i + 1]) : bend;
+  });
+}
 
 /** The sibling arm: the primary's own manipulator, mirrored, bolted onto the podium. */
 export const SIBLING_ARM = Object.freeze({ ...ARM, id: 'S', mirror: true });
@@ -100,8 +118,8 @@ export function moduleSeatZ(index) {
  * safety check will accept.
  */
 export function bendLimitedArm(arm, rigid) {
-  const bend = rigid.constraints?.bend_limit_rad ?? PROPAGATE_CONSTRAINTS.bend_limit_rad;
-  return { ...arm, jointLimit: Math.min(arm.jointLimit, bend) };
+  const bends = bendLimits(rigid);
+  return { ...arm, jointLimits: arm.lengths.map((_, joint) => (joint === 0 ? limitOf(arm, 0) : Math.min(limitOf(arm, joint), bends[joint - 1]))) };
 }
 
 /**
@@ -124,7 +142,8 @@ export function propagateSafety(rigid, safety = {}, { stacked = 0 } = {}) {
   }
   return {
     ...safety,
-    bend_limit_rad: constraints.bend_limit_rad,
+    bend_limit_rad: bendLimits(rigid),
+    limb_interference: constraints.limb_interference,
     self_clearance_px: constraints.self_clearance_px,
     singularity_margin: constraints.singularity_margin,
     obstacles: [...(safety.obstacles || []), ...obstacles],

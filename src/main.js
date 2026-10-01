@@ -3,7 +3,7 @@ import compiled from '../data/compiled.json';
 import registry from '../data/sources.json';
 import { planHalfFoldMotion } from './half-fold.js';
 import { getShirtMeshInfo, planShirtMultiFoldMotion, shirtFoldGuideSvg } from './shirt-fold.js';
-import { ARM, ARM_B, buildDatasetManifest, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, reduceSafeCellMotion, solveInverseKinematics } from './core.js';
+import { ARM, ARM_B, buildDatasetManifest, limitOf, buildEpisodeArtifact, clamp, computePolicyProgress, distance, evaluateCellSafety, formatSolverTicker, forwardKinematics, GOAL_Z, HALT, haltState, HOME_POSE, liveDragStep, MAX_EPISODE_TRANSITIONS, nearestArm, planSafeCellMotion, planTowelFoldMotion, projectToReachableWorkspace, reduceSafeCellMotion, solveInverseKinematics } from './core.js';
 import { ClothSimulator, clothCorners } from './cloth.js';
 import { loadClothSettings, onClothSettingsChange } from './cloth-settings.js';
 import { FOLD_GUIDE, FOLD_STAGES, clothPointToScene, foldGuideStage } from './fold-guide.js';
@@ -18,7 +18,7 @@ const $ = (selector) => document.querySelector(selector);
 const fmt = (value, digits = 2) => Number(value).toFixed(digits);
 
 const JOINT_LABELS = ['Yaw', 'Pitch', 'Pitch', 'Yaw', 'Pitch', 'Roll'];
-const jointLimitOf = (index) => (index === 0 ? ARM.yawLimit : ARM.jointLimit);
+const jointLimitOf = (index) => limitOf(ARM, index);
 const ARMS = [ARM, ARM_B];
 // Ceiling for the Step budget slider and the fold task's default budget.
 // Raised from the old flat 400 because the fold plan's own settle tail (see
@@ -1019,6 +1019,7 @@ const SAFETY_COPY = {
   self: 'Blocked self-collision',
   obstacle: 'Blocked at obstacle',
   singular: 'Blocked near singularity',
+  interference: 'Blocked: limbs would touch',
 };
 
 /**

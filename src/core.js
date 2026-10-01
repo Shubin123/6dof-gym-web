@@ -6,6 +6,45 @@
  * a real height and a real lateral offset, and both the top-down SVG scene and
  * the 3-D viewport are views of the same spatial chain.
  */
+/**
+ * The arm's physical body, in scene px: what the 3-D view draws and what the
+ * interference check tests. Each link is a rounded capsule of radius
+ * linkRadius[i], tapering from shoulder to wrist, that ends at the surface
+ * of its joint housings rather than at the joint centre; each joint i is a
+ * housing - a cylinder of radius housingRadius[i] and half-length
+ * housingRadius[i] * housingAspect along its rotation axis - that the links
+ * either side of it turn around. `clearance` is the gap two parts that are
+ * not bolted together must always keep.
+ */
+export const ARM_BODY = Object.freeze({
+  linkRadius: Object.freeze([9, 8, 7, 6, 5.5, 5]),
+  housingRadius: Object.freeze([15, 13.5, 12, 10.5, 9.5, 9]),
+  housingAspect: 0.75,
+  clearance: 2,
+});
+
+/**
+ * Per-joint limits that keep the links either side of every joint apart,
+ * with `clearance` to spare. (With the shapes above, even the 1.7 rad hard
+ * stop leaves adjacent parts about a pixel apart; a task that enforces
+ * limb_interference keeps the full clearance.)
+ *
+ * At joint k the two links' near ends sit housingRadius[k] from the joint,
+ * so with an angle phi between the links those ends are 2 R sin(phi / 2)
+ * apart and must clear r[k-1] + r[k] + clearance. Every articulated joint
+ * turns about an axis perpendicular to its link, so the bend is exactly |q|
+ * and the limit is pi - phi_min. Joint 0 is the base yaw, which bends
+ * nothing, and keeps its full swing.
+ */
+export function jointLimitsForBody(body = ARM_BODY, { yawLimit = Math.PI, hardStop = 1.7 } = {}) {
+  const r = body.linkRadius;
+  return Object.freeze(body.housingRadius.map((housing, k) => {
+    if (k === 0) return yawLimit;
+    const phiMin = 2 * Math.asin(Math.min(1, (r[k - 1] + r[k] + body.clearance) / (2 * housing)));
+    return Math.min(hardStop, Math.PI - phiMin);
+  }));
+}
+
 export const ARM = Object.freeze({
   id: 'A',
   base: [200, 345],
@@ -53,7 +92,7 @@ export const HALT = Object.freeze({
 export const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 
 /** Joint 0 is the base yaw and swings further than the articulated joints. */
-export const limitOf = (arm, index) => (index === 0 ? arm.yawLimit : arm.jointLimit);
+export const limitOf = (arm, index) => arm.jointLimits?.[index] ?? (index === 0 ? arm.yawLimit : arm.jointLimit);
 export const distance = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], (a[2] || 0) - (b[2] || 0));
 
 const add = (a, b, scale = 1) => [a[0] + b[0] * scale, a[1] + b[1] * scale, a[2] + b[2] * scale];
@@ -159,6 +198,55 @@ export function linkBendAngles(points) {
   return dirs.slice(1).map((dir, i) => Math.acos(clamp(dot(dirs[i], dir), -1, 1)));
 }
 
+/**
+ * The arm's solid parts at pose q, as capsules { a, b, radius, kind, index }:
+ * a link runs between its two housings' surfaces, a housing lies along its
+ * joint axis. Joint 0's housing sits on the column, at the chain's base.
+ */
+export function armBodies(q, arm = ARM, body = ARM_BODY) {
+  const { points, axes } = forwardKinematics(q, arm);
+  const parts = [];
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const dir = unit(sub(points[i + 1], points[i]));
+    const start = add(points[i], dir, body.housingRadius[i]);
+    // The last link carries the tool out to the tip: no housing at its end.
+    const end = i + 1 < body.housingRadius.length ? add(points[i + 1], dir, -body.housingRadius[i + 1]) : points[i + 1];
+    parts.push({ kind: 'link', index: i, a: start, b: end, radius: body.linkRadius[i] });
+  }
+  body.housingRadius.forEach((radius, k) => {
+    const half = radius * body.housingAspect;
+    parts.push({ kind: 'housing', index: k, a: add(points[k], axes[k], -half), b: add(points[k], axes[k], half), radius });
+  });
+  return parts;
+}
+
+/** Link i is bolted to housings i and i + 1; any other pair of parts must keep clear. */
+const bolted = (p, q) => {
+  if (p.kind === q.kind) return false;
+  const link = p.kind === 'link' ? p : q;
+  const housing = p.kind === 'link' ? q : p;
+  return housing.index === link.index || housing.index === link.index + 1;
+};
+
+/**
+ * Smallest gap between any two parts of one arm that are not bolted
+ * together, less the body clearance: negative when a bend drives one limb
+ * or housing into another. Covers neighbours meeting at a sharp bend and
+ * limbs folded back across several joints.
+ */
+export function limbInterference(q, arm = ARM, body = ARM_BODY) {
+  const parts = armBodies(q, arm, body);
+  let margin = Infinity;
+  for (let i = 0; i < parts.length; i += 1) {
+    for (let j = i + 1; j < parts.length; j += 1) {
+      if (bolted(parts[i], parts[j])) continue;
+      const gap = segmentDistance(parts[i].a, parts[i].b, parts[j].a, parts[j].b) - parts[i].radius - parts[j].radius;
+      margin = Math.min(margin, gap - body.clearance);
+    }
+  }
+  return margin;
+}
+
 /** Eigenvalues of a small symmetric matrix by cyclic Jacobi rotations. */
 function symmetricEigenvalues(matrix) {
   const a = matrix.map((row) => [...row]);
@@ -232,6 +320,8 @@ const mountedOn = (arm, obstacle) => Math.hypot(arm.base[0] - obstacle.center[0]
  *                       clearance }] - pedestals, podiums, assembled stacks.
  *                       An arm skips its first link against the column it
  *                       stands on, so it may sit on it but not fold into it.
+ *   limb_interference   true: no two parts of an arm's body (ARM_BODY)
+ *                       that are not bolted together may touch
  *   singularity_margin  min smallest singular value of each arm's
  *                       normalised tool Jacobian (jacobianSingularValues):
  *                       keeps every arm clear of all singular postures
@@ -304,6 +394,12 @@ export function evaluateCellSafety(poses, safety = {}) {
     }
   }
 
+  // Interference: no limb or joint housing runs into another of the same arm.
+  let interference = Infinity;
+  if (safety.limb_interference) {
+    for (const { q, arm = ARM } of poses) interference = Math.min(interference, limbInterference(q, arm));
+  }
+
   // Singularity: every arm keeps full, well-conditioned control of its tool.
   let singularity = Infinity;
   if (safety.singularity_margin != null) {
@@ -316,6 +412,7 @@ export function evaluateCellSafety(poses, safety = {}) {
   else if (armClearance < requiredArmClearance - 1e-6) reason = 'collision';
   else if (bendMargin < -1e-6) reason = 'bend';
   else if (selfClearance < (safety.self_clearance_px ?? 0) - 1e-6) reason = 'self';
+  else if (interference < -1e-6) reason = 'interference';
   else if (obstacleMargin < -1e-6) reason = 'obstacle';
   else if (singularity < (safety.singularity_margin ?? 0) - 1e-9) reason = 'singular';
   return {
@@ -329,6 +426,7 @@ export function evaluateCellSafety(poses, safety = {}) {
     obstacleMargin,
     obstacle: obstacleMargin < -1e-6 ? obstacle : null,
     singularity,
+    interference,
   };
 }
 

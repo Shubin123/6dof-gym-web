@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import compiled from '../data/compiled.json' with { type: 'json' };
-import { ARM, ARM_B, clamp, evaluateCellSafety, forwardKinematics, HOME_POSE, jacobianSingularValues, linkBendAngles } from '../src/core.js';
+import { ARM, ARM_B, ARM_BODY, armBodies, clamp, evaluateCellSafety, forwardKinematics, HOME_POSE, jacobianSingularValues, jointLimitsForBody, limbInterference, linkBendAngles } from '../src/core.js';
 import { RigidScene } from '../src/rigid.js';
 import { goalCenter, planRigidTask, rigidOutcome } from '../src/rigid-tasks.js';
 import {
@@ -224,7 +224,7 @@ test('Task 18 constraints reject bent, self-colliding, and podium-piercing poses
 
   // Bend: a joint past the limit (but inside the hard stop) is rejected.
   const bent = [...HOME_POSE];
-  bent[2] = 1.69;
+  bent[1] = 1.69;
   assert.equal(evaluateCellSafety([{ q: bent, arm: ARM }], cell).reason, 'bend');
   assert.equal(evaluateCellSafety([{ q: bent, arm: ARM }], safety).safe, true, 'Plain cell safety has no bend limit');
 
@@ -280,4 +280,45 @@ test('Task 18 rejects near-singular poses and its whole plan stays clear of them
   const plan = planAutoPropagateTask(task.rigid, scene, { q: [...HOME_POSE], arm: ARM }, safety);
   const worst = Math.min(...plan.frames.map(([q]) => jacobianSingularValues(q, ARM)[0]));
   assert.ok(worst >= margin, `primary comes within ${worst} of a singularity`);
+});
+
+test('Joint limits follow from the link and housing shapes, so limbs never touch at a bend', () => {
+  const limits = jointLimitsForBody();
+  assert.equal(limits[0], Math.PI, 'base yaw bends nothing');
+  for (let k = 1; k < 6; k += 1) {
+    assert.ok(limits[k] < ARM.jointLimit && limits[k] > 1.4, `joint ${k} limit ${limits[k]}`);
+    const at = (angle) => { const q = [0, 0, 0, 0, 0, 0]; q[k] = angle; return limbInterference(q, ARM); };
+    assert.ok(Math.abs(at(limits[k])) < 1e-6, `joint ${k}: parts just keep their clearance at the limit`);
+    assert.ok(at(limits[k] + 0.05) < 0, `joint ${k}: parts collide past the limit`);
+    // Even the 1.7 rad hard stop leaves neighbouring parts apart (no clearance asked).
+    const q = [0, 0, 0, 0, 0, 0];
+    q[k] = ARM.jointLimit;
+    assert.ok(limbInterference(q, ARM, { ...ARM_BODY, clearance: 0 }) > 0, `joint ${k}: no overlap at the hard stop`);
+  }
+  // The home pose fits the tighter limits.
+  HOME_POSE.forEach((value, joint) => assert.ok(Math.abs(value) <= limits[joint]));
+  assert.ok(limbInterference(HOME_POSE, ARM) >= 0);
+  // Bodies: six links ending at housing surfaces, six housings along joint axes.
+  const parts = armBodies(HOME_POSE, ARM);
+  assert.equal(parts.filter((p) => p.kind === 'link').length, 6);
+  assert.equal(parts.filter((p) => p.kind === 'housing').length, 6);
+});
+
+test('Task 18 enforces limb interference on every frame of both arms', () => {
+  const cell = propagateSafety(task.rigid, safety);
+  assert.equal(cell.limb_interference, true);
+  cell.bend_limit_rad.forEach((limit, i) => assert.ok(limit <= jointLimitsForBody()[i + 1] + 1e-12));
+  // Inside the old flat 1.65 rad limit but past joint 2's shape limit: the
+  // boom and forearm would touch, and only the interference check sees it.
+  const pinched = [0, 0, 1.62, 0, 0, 0];
+  assert.equal(evaluateCellSafety([{ q: pinched, arm: ARM }], { bend_limit_rad: 1.65 }).safe, true);
+  assert.equal(evaluateCellSafety([{ q: pinched, arm: ARM }], { limb_interference: true }).reason, 'interference');
+  // Hard folds across several joints, each within its limit, stay clear.
+  assert.equal(evaluateCellSafety([{ q: [0, 1.5, 1.5, 1.5, 1.5, 1.5], arm: ARM }], { limb_interference: true }).safe, true);
+
+  const scene = new RigidScene(task.rigid, { arms: 1 });
+  const plan = planAutoPropagateTask(task.rigid, scene, { q: [...HOME_POSE], arm: ARM }, safety);
+  assert.ok(plan);
+  for (const [q] of plan.frames) assert.ok(limbInterference(q, ARM) >= -1e-6, 'primary limbs keep clear');
+  for (const q of plan.sibling.frames) assert.ok(limbInterference(q, plan.sibling.arm) >= -1e-6, 'sibling limbs keep clear');
 });
